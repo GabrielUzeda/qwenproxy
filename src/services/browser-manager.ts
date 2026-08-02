@@ -257,7 +257,8 @@ export async function getOrLaunchBrowser(browserType: BrowserType = 'chromium'):
 
   browser = await engine.launch({
     headless: config.browser.headless,
-    channel,
+    channel: config.browser.executablePath ? undefined : channel,
+    executablePath: config.browser.executablePath,
     ignoreDefaultArgs: ['--enable-automation', '--enable-blink-features'],
     args: launchArgs,
   });
@@ -556,6 +557,10 @@ export async function closePlaywright() {
 export async function initPlaywrightForAccount(account: QwenAccount, _headless = true, browserType: BrowserType = 'chromium') {
   const sharedBrowser = await getOrLaunchBrowser(browserType);
   const baseAccountId = getBaseAccountId(account.id);
+  const { getAccountCredentials } = await import('../core/accounts.js');
+  const realCreds = getAccountCredentials(baseAccountId) || account;
+  const realEmail = realCreds.email;
+  const realPassword = realCreds.password;
 
   console.log(`[Playwright] Creating context for account ${account.email} on shared browser...`);
 
@@ -574,17 +579,17 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
 
   const hasAuth = await hasValidAuthCookie(acctPage);
 
-  if (!hasAuth && account.email && account.password) {
-    await loginToQwenWithContext(acctContext, acctPage, account.email, account.password);
+  if (!hasAuth && realEmail && realPassword && realPassword !== '***') {
+    await loginToQwenWithContext(acctContext, acctPage, realEmail, realPassword);
   }
 
   try {
     await acctPage.goto('https://chat.qwen.ai/c/new-chat', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
     const url = acctPage.url();
     if (url.includes('auth') || url.includes('login')) {
-      if (account.email && account.password) {
+      if (realEmail && realPassword && realPassword !== '***') {
         console.log(`[Playwright] Session expired for ${account.email}, re-logging in...`);
-        await loginToQwenWithContext(acctContext, acctPage, account.email, account.password);
+        await loginToQwenWithContext(acctContext, acctPage, realEmail, realPassword);
         await acctPage.goto('https://chat.qwen.ai/c/new-chat', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
       } else {
         console.warn(`[Playwright] Session expired for account ${account.id} but no credentials available for re-login.`);
@@ -606,7 +611,8 @@ export async function launchManualLoginAccount(accountId: string, browserType: B
 
   const manualBrowser = await engine.launch({
     headless: false,
-    channel,
+    channel: config.browser.executablePath ? undefined : channel,
+    executablePath: config.browser.executablePath,
     ignoreDefaultArgs: ['--enable-automation'],
     args: getBrowserLaunchArgs(),
   });

@@ -2,6 +2,7 @@ import crypto from 'crypto'
 import { getDatabase } from './database.js'
 import { config } from './config.js'
 import { encrypt, decrypt } from './crypto-utils.js'
+import { getBaseAccountId } from './account-lanes.js'
 
 export interface QwenAccount {
   id: string
@@ -35,7 +36,15 @@ export function invalidateAccountsCache(): void {
 }
 
 export function loadAccounts(): QwenAccount[] {
-  return getCachedAccounts().map(a => ({ ...a, password: '***' }))
+  const dbAccounts = getCachedAccounts().map(a => ({ ...a, password: '***' }))
+  if (dbAccounts.length === 0 && process.env.QWEN_EMAIL) {
+    return [{
+      id: 'global',
+      email: process.env.QWEN_EMAIL,
+      password: '***',
+    }]
+  }
+  return dbAccounts
 }
 
 export function addAccount(email: string, password: string, id?: string): QwenAccount {
@@ -81,6 +90,14 @@ export function listAccounts(): QwenAccount[] {
 }
 
 export function getAccountCredentials(id: string): QwenAccount | undefined {
+  const baseId = getBaseAccountId(id)
+  if (baseId === 'global') {
+    return {
+      id: 'global',
+      email: process.env.QWEN_EMAIL || 'global@qwen',
+      password: process.env.QWEN_PASSWORD || '***',
+    }
+  }
   const cached = getCachedAccounts()
   return cached.find(a => a.id === id)
 }

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import fs from 'fs'
 
 const envSchema = z.object({
   PORT: z.string().default('3000'),
@@ -7,6 +8,7 @@ const envSchema = z.object({
   BROWSER: z.enum(['chromium', 'firefox', 'webkit', 'chrome', 'edge']).default('chromium'),
   USER_DATA_DIR: z.string().default('./qwen_profiles'),
   USER_AGENT: z.string().default('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36'),
+  EXECUTABLE_PATH: z.string().default(''),
   LOG_CONSOLE: z.string().default('false'),
   NAVIGATION_TIMEOUT: z.string().default('90000'),
   PAGE_TIMEOUT: z.string().default('60000'),
@@ -58,6 +60,7 @@ export const config = {
   browser: {
     headless: env.HEADLESS !== 'false',
     type: env.BROWSER,
+    executablePath: env.EXECUTABLE_PATH || (process.platform === 'linux' && fs.existsSync('/run/current-system/sw/bin/google-chrome') ? '/run/current-system/sw/bin/google-chrome' : undefined),
     userDataDir: env.USER_DATA_DIR,
     userAgent: env.USER_AGENT,
     args: [
