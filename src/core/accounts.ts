@@ -99,7 +99,7 @@ export function getAccountCredentials(id: string): QwenAccount | undefined {
     }
   }
   const cached = getCachedAccounts()
-  return cached.find(a => a.id === id)
+  return cached.find(a => a.id === baseId)
 }
 
 export function updateAccountCooldown(id: string, cooldownUntil: number, reason: string | null): void {

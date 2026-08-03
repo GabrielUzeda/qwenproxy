@@ -27,6 +27,22 @@ export function resolveBrowserEngine(browserType: BrowserType): BrowserEngineCon
   }
 }
 
+export function resolveBrowserLaunchOptions(browserType: BrowserType) {
+  const { engine, channel } = resolveBrowserEngine(browserType);
+  const isChromeCompatible = browserType === 'chromium' || browserType === 'chrome';
+  const isAutoChromePath = !process.env.EXECUTABLE_PATH && config.browser.executablePath === '/run/current-system/sw/bin/google-chrome';
+
+  const executablePath = (isAutoChromePath && !isChromeCompatible)
+    ? undefined
+    : config.browser.executablePath;
+
+  return {
+    engine,
+    channel: executablePath ? undefined : channel,
+    executablePath,
+  };
+}
+
 export interface AccountHeaderCache {
   currentHeaders: Record<string, string>;
   cachedQwenHeaders: { headers: Record<string, string>, chatSessionId: string, parentMessageId: string | null } | null;
@@ -250,15 +266,15 @@ export async function clearPageRuntimeState(page: Page | null): Promise<void> {
 
 export async function getOrLaunchBrowser(browserType: BrowserType = 'chromium'): Promise<Browser> {
   if (browser?.isConnected()) return browser;
-  const { engine, channel } = resolveBrowserEngine(browserType);
+  const { engine, channel, executablePath } = resolveBrowserLaunchOptions(browserType);
   console.log(`[Playwright] Launching shared ${browserType} browser...`);
 
   const launchArgs = getBrowserLaunchArgs();
 
   browser = await engine.launch({
     headless: config.browser.headless,
-    channel: config.browser.executablePath ? undefined : channel,
-    executablePath: config.browser.executablePath,
+    channel,
+    executablePath,
     ignoreDefaultArgs: ['--enable-automation', '--enable-blink-features'],
     args: launchArgs,
   });
@@ -562,7 +578,7 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
   const realEmail = realCreds.email;
   const realPassword = realCreds.password;
 
-  console.log(`[Playwright] Creating context for account ${account.email} on shared browser...`);
+  console.log(`[Playwright] Creating context for account ${account.id} on shared browser...`);
 
   const storageState = loadStorageState(baseAccountId);
   const acctProfile = getFingerprintProfile(account.id);
@@ -588,17 +604,17 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
     const url = acctPage.url();
     if (url.includes('auth') || url.includes('login')) {
       if (realEmail && realPassword && realPassword !== '***') {
-        console.log(`[Playwright] Session expired for ${account.email}, re-logging in...`);
+        console.log(`[Playwright] Session expired for account ${account.id}, re-logging in...`);
         await loginToQwenWithContext(acctContext, acctPage, realEmail, realPassword);
         await acctPage.goto('https://chat.qwen.ai/c/new-chat', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
       } else {
         console.warn(`[Playwright] Session expired for account ${account.id} but no credentials available for re-login.`);
       }
     } else {
-      console.log(`[Playwright] Session validated for ${account.email}.`);
+      console.log(`[Playwright] Session validated for account ${account.id}.`);
     }
   } catch (err: any) {
-    console.warn(`[Playwright] Failed to validate session for ${account.email}: ${err.message}`);
+    console.warn(`[Playwright] Failed to validate session for account ${account.id}: ${err.message}`);
   }
 
   if (await hasValidAuthCookie(acctPage)) {
@@ -607,12 +623,12 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
 }
 
 export async function launchManualLoginAccount(accountId: string, browserType: BrowserType = 'chromium'): Promise<{ context: BrowserContext, page: Page }> {
-  const { engine, channel } = resolveBrowserEngine(browserType);
+  const { engine, channel, executablePath } = resolveBrowserLaunchOptions(browserType);
 
   const manualBrowser = await engine.launch({
     headless: false,
-    channel: config.browser.executablePath ? undefined : channel,
-    executablePath: config.browser.executablePath,
+    channel,
+    executablePath,
     ignoreDefaultArgs: ['--enable-automation'],
     args: getBrowserLaunchArgs(),
   });

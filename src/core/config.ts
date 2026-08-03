@@ -60,7 +60,7 @@ export const config = {
   browser: {
     headless: env.HEADLESS !== 'false',
     type: env.BROWSER,
-    executablePath: env.EXECUTABLE_PATH || (process.platform === 'linux' && fs.existsSync('/run/current-system/sw/bin/google-chrome') ? '/run/current-system/sw/bin/google-chrome' : undefined),
+    executablePath: env.EXECUTABLE_PATH || ((env.BROWSER === 'chromium' || env.BROWSER === 'chrome') && process.platform === 'linux' && fs.existsSync('/run/current-system/sw/bin/google-chrome') ? '/run/current-system/sw/bin/google-chrome' : undefined),
     userDataDir: env.USER_DATA_DIR,
     userAgent: env.USER_AGENT,
     args: [
