@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events'
+import os from 'os'
 import { config } from './config.js'
 
 interface MetricPoint {
@@ -36,6 +37,8 @@ export class Metrics extends EventEmitter {
       ['streams.errors', 'counter', 'Stream errors'],
       ['memory.heap.used', 'gauge', 'Heap memory used (bytes)'],
       ['memory.heap.total', 'gauge', 'Heap memory total (bytes)'],
+      ['memory.rss', 'gauge', 'Resident set size (bytes) — real memory footprint'],
+      ['memory.system.total', 'gauge', 'Total system memory (bytes)'],
       ['cache.set', 'counter', 'Cache set operations'],
       ['cache.hit', 'counter', 'Cache hits'],
       ['cache.miss', 'counter', 'Cache misses'],
@@ -119,6 +122,8 @@ export class Metrics extends EventEmitter {
     const mem = process.memoryUsage()
     this.gauge('memory.heap.used', mem.heapUsed)
     this.gauge('memory.heap.total', mem.heapTotal)
+    this.gauge('memory.rss', mem.rss)
+    this.gauge('memory.system.total', os.totalmem())
   }
 
   setExportCallback(callback: (metrics: Map<string, MetricDefinition>) => void): void {

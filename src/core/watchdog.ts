@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events'
+import os from 'os'
 import { config } from './config.js'
 import { metrics } from './metrics.js'
 
@@ -51,7 +52,9 @@ export class Watchdog extends EventEmitter {
 
   private checkRAM(): 'ok' | 'warning' | 'critical' {
     const mem = process.memoryUsage()
-    const usagePercent = (mem.heapUsed / mem.heapTotal) * 100
+    const systemTotal = os.totalmem()
+    // Real memory footprint = RSS (heap alone is misleading). % of system RAM.
+    const usagePercent = systemTotal > 0 ? (mem.rss / systemTotal) * 100 : 0
 
     if (usagePercent > config.watchdog.ram.criticalThreshold) return 'critical'
     if (usagePercent > config.watchdog.ram.warningThreshold) return 'warning'

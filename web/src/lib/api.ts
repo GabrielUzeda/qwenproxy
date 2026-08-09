@@ -1,0 +1,125 @@
+export class ApiError extends Error {
+  status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.status = status
+  }
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`/admin/api${path}`, {
+    ...init,
+    headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
+  })
+  const text = await res.text()
+  let json: any = null
+  try {
+    json = text ? JSON.parse(text) : null
+  } catch {
+    /* non-JSON body */
+  }
+  if (!res.ok) {
+    throw new ApiError(res.status, json?.error || `HTTP ${res.status}`)
+  }
+  return json as T
+}
+
+export interface Account {
+  id: string
+  email: string
+  cooldown: number
+  cooldownReason: string | null
+  activeLoad: number
+}
+
+export interface SeriesPoint {
+  t: number
+  v: number
+}
+
+export interface Overview {
+  uptime: number
+  requestsTotal: number
+  requestsErrors: number
+  requestsSuccessRate: number
+  latency?: { sum: number; count: number }
+  memory: {
+    rss: number
+    heapUsed: number
+    heapTotal: number
+    systemTotal: number
+    pct: number
+  }
+  cpu?: { cores: number; load1m: number }
+  accounts: Account[]
+  inUseAccounts: string[]
+  users: { id: string; email: string | null; streams: number }[]
+  totalUserStreams: number
+  warmPool: Record<string, number>
+  sessionCount: number
+  activeStreamsMetric: number
+  lanes: number
+  series?: Record<string, SeriesPoint[]>
+  userRateLimitRpm: number
+  userMaxConcurrency: number
+}
+
+export interface AdminUser {
+  id: string
+  email: string | null
+  apiKey: string
+  rateLimitRpm: number
+  maxConcurrency: number
+  activeStreams: number
+}
+
+export interface SettingsData {
+  settings: Record<string, string>
+  types: Record<string, string>
+  allowlist: string[]
+  effective: Record<string, number | boolean>
+}
+
+export const api = {
+  overview: () => request<Overview>('/overview'),
+  accounts: () => request<{ accounts: Account[]; inUse: string[] }>('/accounts'),
+  addAccount: (email: string, password: string) => request('/accounts', { method: 'POST', body: JSON.stringify({ email, password }) }),
+  removeAccount: (id: string) => request(`/accounts/${id}`, { method: 'DELETE' }),
+  clearCooldown: (id: string) => request(`/accounts/${id}/clear-cooldown`, { method: 'POST' }),
+  refreshHeaders: (id: string) => request(`/accounts/${id}/refresh`, { method: 'POST' }),
+  users: () => request<AdminUser[]>('/users'),
+  createUser: (u: { email?: string; apiKey: string; rateLimitRpm: number; maxConcurrency: number }) => request('/users', { method: 'POST', body: JSON.stringify(u) }),
+  updateUser: (id: string, u: Partial<{ email: string; apiKey: string; rateLimitRpm: number; maxConcurrency: number }>) => request(`/users/${id}`, { method: 'PUT', body: JSON.stringify(u) }),
+  deleteUser: (id: string) => request(`/users/${id}`, { method: 'DELETE' }),
+  settings: () => request<SettingsData>('/settings'),
+  saveSettings: (patch: Record<string, string>) => request<{ ok: boolean; restartRequired: boolean }>('/settings', { method: 'POST', body: JSON.stringify(patch) }),
+  metrics: async (): Promise<string> => {
+    const res = await fetch('/admin/api/metrics')
+    if (!res.ok) throw new ApiError(res.status, 'Falha ao buscar métricas')
+    return res.text()
+  },
+}
+
+export function genKey(): string {
+  const rand = (n: number) => Math.random().toString(36).slice(2, 2 + n)
+  return `sk-${rand(10)}${rand(10)}`
+}
+
+export function fmtBytes(n?: number): string {
+  if (n == null) return '—'
+  const u = ['B', 'KB', 'MB', 'GB']
+  let i = 0
+  while (n >= 1024 && i < u.length - 1) {
+    n /= 1024
+    i++
+  }
+  return `${n >= 100 || i === 0 ? Math.round(n) : n.toFixed(1)} ${u[i]}`
+}
+
+export function fmtSec(s?: number): string {
+  if (s == null) return '—'
+  if (s < 60) return `${s}s`
+  if (s < 3600) return `${Math.floor(s / 60)}m`
+  if (s < 86400) return `${Math.floor(s / 3600)}h`
+  return `${Math.floor(s / 86400)}d`
+}

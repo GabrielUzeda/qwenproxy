@@ -4,10 +4,14 @@ import { createQwenStream, RetryableQwenStreamError } from '../services/qwen.js'
 import type { OpenAIRequest } from '../utils/types.js';
 import { getModelContextWindow } from '../core/model-registry.js'
 import { truncateMessages, estimateTokenCount } from '../utils/context-truncation.js';
-import { getNextAccount, getNextAvailableAccount, markAccountRateLimited, getAccountCooldownInfo, markAccountInUse, releaseAccountInUse, getInUseAccounts } from '../core/account-manager.js';
+import { getNextAccount, getNextAvailableAccount, getAccountById, onAccountFreed, markAccountRateLimited, getAccountCooldownInfo, markAccountInUse, releaseAccountInUse, getInUseAccounts } from '../core/account-manager.js';
 import { loadAccounts } from '../core/accounts.js';
 import { registerStream, removeStream, getStream } from '../core/stream-registry.js';
 import { metrics } from '../core/metrics.js'
+import { config } from '../core/config.js';
+import { getSession, resolveSessionKey } from '../services/session-manager.js';
+import type { SessionEntry } from '../services/session-manager.js';
+import { fetchQwenChatHistory } from '../services/qwen.js';
 import {
   getForcedToolName,
   getRecentToolNames,
@@ -16,15 +20,85 @@ import {
   buildToolCallContract,
   getToolChoiceMode,
 } from './tool-handler.js';
-import { handleStreamingResponse, handleNonStreamingResponse } from './stream-handler.js';
+import { handleStreamingResponse, collectNonStreamingResult } from './stream-handler.js';
+import { buildAnswerDirective } from '../utils/degenerate-answer.js';
+import { checkUserRateLimit, tryAcquireUserSlot, releaseUserSlot, getUserActiveStreams } from '../core/user-manager.js';
+import type { UserIdentity } from '../core/user-manager.js';
 
 export { getIncrementalDelta } from './sse-parser.js';
 export type { DeltaResult } from './sse-parser.js';
 
+/**
+ * Verifies against the Qwen server that the pinned session chat still mirrors
+ * the client's conversation before economical mode is allowed. A mismatch (edited
+ * messages, reset conversation, stale parent) forces a fresh bootstrap so the
+ * served context — and therefore the answers — never diverge from what the
+ * client believes the conversation is.
+ */
+async function verifyServerContextMatches(sessionKey: string, session: SessionEntry, lastUserContent: string): Promise<boolean> {
+  try {
+    const history = await fetchQwenChatHistory(
+      session.chatId,
+      session.headers,
+      session.accountId === 'global' ? undefined : session.accountId,
+      8,
+    );
+    if (!history.hasHistory) return false;
+    const msgs = history.messages;
+    let lastUserMsg;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === 'user') {
+        lastUserMsg = msgs[i];
+        break;
+      }
+    }
+    if (!lastUserMsg) return false;
+    const marker = `User: ${(lastUserContent || '').trim()}`;
+    const content = lastUserMsg.content || '';
+    // The server's most recent user turn must contain the same last message the
+    // client is sending now.
+    if (!content.trimEnd().endsWith(marker) && !content.includes(marker)) {
+      console.warn(`[Chat] Session ${sessionKey}: server last user turn does not match client (expected marker "${marker.slice(0, 60)}...")`);
+      return false;
+    }
+    // The user message must be threaded onto the assistant reply we recorded.
+    if (session.parentId && lastUserMsg.parentId !== session.parentId) {
+      console.warn(`[Chat] Session ${sessionKey}: parent mismatch (server=${lastUserMsg.parentId}, tracked=${session.parentId}). Re-syncing.`);
+      return false;
+    }
+    return true;
+  } catch (err: any) {
+    console.warn(`[Chat] Session verification failed for ${sessionKey}:`, err.message);
+    return false;
+  }
+}
+
 export async function chatCompletions(c: Context) {
+  const user = (c as any).get?.('user') as UserIdentity | undefined;
+  let userSlotHeld = false;
+  let userSlotReleased = false;
+  const releaseUserSlotOnce = () => {
+    if (!userSlotHeld || userSlotReleased || !user) return;
+    userSlotReleased = true;
+    releaseUserSlot(user.id);
+  };
+
   try {
     const body: OpenAIRequest = await c.req.json();
     const isStream = body.stream ?? false;
+
+    if (user) {
+      if (!checkUserRateLimit(user.id, user.rateLimitRpm)) {
+        return c.json({ error: { message: `Rate limit exceeded for user ${user.id}` } }, 429);
+      }
+      if (!tryAcquireUserSlot(user.id, user.maxConcurrency)) {
+        return c.json({ error: { message: `Concurrency limit exceeded for user ${user.id} (max ${user.maxConcurrency})` } }, 429);
+      }
+      userSlotHeld = true;
+      if (getUserActiveStreams(user.id) <= user.maxConcurrency) {
+        console.log(`[Chat] user=${user.id} activeStreams=${getUserActiveStreams(user.id)}`);
+      }
+    }
     
     let prompt = '';
     const messages = body.messages || [];
@@ -36,6 +110,7 @@ export async function chatCompletions(c: Context) {
     const pendingMultimodal: Array<Array<{ type: string; text?: string; image_url?: { url: string }; video_url?: { url: string }; audio_url?: { url: string }; file_url?: { url: string } }>> = [];
 
     const toolCallIdToName = new Map<string, string>();
+    let lastUserContent = '';
     for (const msg of messages) {
       if (msg.role === 'assistant' && Array.isArray((msg as any).tool_calls)) {
         for (const tc of (msg as any).tool_calls) {
@@ -79,6 +154,7 @@ export async function chatCompletions(c: Context) {
       if (msg.role === 'system') {
         systemPromptParts.push((contentStr || '') + '\n');
       } else if (msg.role === 'user') {
+        lastUserContent = contentStr || '';
         promptParts.push(`User: ${contentStr || ''}\n`);
       } else if (msg.role === 'assistant') {
         let assistantContent = contentStr || '';
@@ -164,39 +240,73 @@ export async function chatCompletions(c: Context) {
 
     const isThinkingModel = !body.model.includes('no-thinking');
 
+    const rawSessionKey = (typeof bodyAny.user === 'string' && bodyAny.user.trim())
+      ? bodyAny.user.trim()
+      : (c.req.header('x-qwen-session') || c.req.header('x-session-id') || undefined);
+    const sessionKey = rawSessionKey ? (resolveSessionKey(rawSessionKey) ?? rawSessionKey) : undefined;
+    const session = sessionKey ? getSession(sessionKey) : undefined;
+    const lastMsg = messages[messages.length - 1];
+    let canEconomize = !!(
+      session?.historyComplete &&
+      session.accountId !== 'guest' &&
+      lastMsg?.role === 'user' &&
+      lastUserContent &&
+      !hasTools &&
+      pendingMultimodal.length === 0
+    );
+
+    if (canEconomize && config.hybridSessions.verify) {
+      const usable = await verifyServerContextMatches(sessionKey!, session!, lastUserContent);
+      if (!usable) {
+        console.warn(`[Chat] Session ${sessionKey} diverged from server; falling back to full bootstrap.`);
+        canEconomize = false;
+      }
+    }
+    const economicalPrompt = canEconomize
+      ? (systemPrompt ? `${systemPrompt}\nUser: ${lastUserContent}` : `User: ${lastUserContent}`)
+      : undefined;
+    const baseStreamOptions = { sessionKey, economicalPrompt };
+
     const isGuestModeOnly = process.env.QWEN_GUEST_MODE_ONLY?.toLowerCase() === 'true';
-    let stream: ReadableStream | undefined;
-    let uiSessionId = '';
     const completionId = 'chatcmpl-' + crypto.randomUUID();
+    const stopToken = crypto.randomUUID();
     let lastError: any = null;
 
-    if (isGuestModeOnly) {
-      console.log('[Chat] Guest mode only enabled. Bypassing account rotation.');
-      try {
-        const result = await createQwenStream(
-          finalPrompt,
-          isThinkingModel,
-          body.model,
-          null,
-          'guest',
-          undefined,
-          pendingMultimodal.length > 0 ? pendingMultimodal : undefined
-        );
-        stream = result.stream;
-        uiSessionId = result.uiSessionId;
-        registerStream(completionId, {
-          abortController: result.controller,
-          accountId: 'guest',
-          uiSessionId: result.uiSessionId,
-          targetResponseId: '',
-          headers: result.headers,
-        });
-      } catch (err: any) {
-        console.error('[Chat] Guest mode failed:', err.message);
-        throw err;
+    const obtainStream = async (
+      promptForStream: string,
+      forceBootstrapOverride = false,
+    ): Promise<{ stream: ReadableStream; uiSessionId: string }> => {
+      if (isGuestModeOnly) {
+        console.log('[Chat] Guest mode only enabled. Bypassing account rotation.');
+        try {
+          const result = await createQwenStream(
+            promptForStream,
+            isThinkingModel,
+            body.model,
+            null,
+            'guest',
+            undefined,
+            pendingMultimodal.length > 0 ? pendingMultimodal : undefined,
+            { ...baseStreamOptions, forceBootstrap: true }
+          );
+          registerStream(completionId, {
+            abortController: result.controller,
+            accountId: 'guest',
+            uiSessionId: result.uiSessionId,
+            targetResponseId: '',
+            headers: result.headers,
+            stopToken,
+          });
+          return { stream: result.stream, uiSessionId: result.uiSessionId };
+        } catch (err: any) {
+          console.error('[Chat] Guest mode failed:', err.message);
+          throw err;
+        }
       }
-    } else {
-      let account = getNextAccount();
+
+      let account = sessionKey
+        ? (getAccountById(session?.accountId ?? '') ?? getNextAccount())
+        : getNextAccount();
       const triedAccountIds = new Set<string>();
 
       if (!account) {
@@ -215,7 +325,12 @@ export async function chatCompletions(c: Context) {
               1000
             );
           }
-          await new Promise(r => setTimeout(r, 300));
+          // Drain-based wait: pop as soon as any account slot frees, with a
+          // short poll interval as a safety net instead of a blind 300ms sleep.
+          await Promise.race([
+            new Promise(r => setTimeout(r, 300)),
+            onAccountFreed(),
+          ]);
           account = getNextAccount();
         }
         console.log(`[Chat] Waited ${Date.now() - waitStart}ms for a free lane`);
@@ -244,31 +359,33 @@ export async function chatCompletions(c: Context) {
         let retries = 3;
         let retryDelay = 500;
         let success = false;
+        let attempt = 0;
 
         try {
           while (retries > 0) {
+            attempt++;
             try {
               const result = await createQwenStream(
-                finalPrompt,
+                promptForStream,
                 isThinkingModel,
                 body.model,
                 null,
                 accountId === 'global' ? undefined : accountId,
                 undefined,
-                pendingMultimodal.length > 0 ? pendingMultimodal : undefined
+                pendingMultimodal.length > 0 ? pendingMultimodal : undefined,
+                { ...baseStreamOptions, forceBootstrap: forceBootstrapOverride || attempt > 1 }
               );
-              stream = result.stream;
-              uiSessionId = result.uiSessionId;
               registerStream(completionId, {
                 abortController: result.controller,
                 accountId: result.accountId,
                 uiSessionId: result.uiSessionId,
                 targetResponseId: '',
                 headers: result.headers,
+                stopToken,
               });
               success = true;
               releaseAccountInUse(accountId);
-              break;
+              return { stream: result.stream, uiSessionId: result.uiSessionId };
             } catch (err: any) {
               retries--;
 
@@ -317,58 +434,85 @@ export async function chatCompletions(c: Context) {
 
         account = getNextAvailableAccount(triedAccountIds);
       }
-    }
 
-    if (!stream) {
       removeStream(completionId);
       const accounts = loadAccounts();
       const allOnCooldown = accounts.length === 0 || accounts.every(a => getAccountCooldownInfo(a.id) !== null);
-      
+
       if (allOnCooldown) {
         console.warn(`[Chat] CRITICAL: All accounts are rate-limited, on cooldown, or none configured! Falling back to GUEST mode.`);
-        try {
-          const result = await createQwenStream(
-            finalPrompt,
-            isThinkingModel,
-            body.model,
-            null,
-            'guest',
-            undefined,
-            pendingMultimodal.length > 0 ? pendingMultimodal : undefined
-          );
-          stream = result.stream;
-          uiSessionId = result.uiSessionId;
-          registerStream(completionId, {
-            abortController: result.controller,
-            accountId: 'guest',
-            uiSessionId: result.uiSessionId,
-            targetResponseId: '',
-            headers: result.headers,
-          });
-        } catch (guestErr: any) {
-          console.error('[Chat] Guest mode also failed:', guestErr.message);
-          throw lastError || new Error('All accounts and guest mode failed');
-        }
-      } else {
-        throw lastError || new Error('All accounts failed');
+        const result = await createQwenStream(
+          promptForStream,
+          isThinkingModel,
+          body.model,
+          null,
+          'guest',
+          undefined,
+          pendingMultimodal.length > 0 ? pendingMultimodal : undefined,
+          { ...baseStreamOptions, forceBootstrap: true }
+        );
+        registerStream(completionId, {
+          abortController: result.controller,
+          accountId: 'guest',
+          uiSessionId: result.uiSessionId,
+          targetResponseId: '',
+          headers: result.headers,
+          stopToken,
+        });
+        return { stream: result.stream, uiSessionId: result.uiSessionId };
       }
-    }
+
+      throw lastError || new Error('All accounts failed');
+    };
+
+    const acquired = await obtainStream(finalPrompt);
+
+    c.header('X-Stop-Token', stopToken);
 
     if (!isStream) {
-      return handleNonStreamingResponse(c, stream!, completionId, body.model, uiSessionId, hasTools && toolChoiceMode !== 'none', bodyAny.tools || []);
+      const collectResponse = async (acquiredStream: ReadableStream, acquiredSession: string) =>
+        collectNonStreamingResult(c, acquiredStream, completionId, body.model, acquiredSession, hasTools && toolChoiceMode !== 'none', bodyAny.tools || []);
+
+      let completed = await collectResponse(acquired.stream, acquired.uiSessionId);
+
+      let degenerateRetriesLeft = 1;
+      while (
+        degenerateRetriesLeft > 0 &&
+        completed.status === 200 &&
+        completed.degenerate &&
+        completed.toolCalls.length === 0
+      ) {
+        degenerateRetriesLeft--;
+        console.warn(`[Chat] Degenerate reply detected (${JSON.stringify((completed.content || '').slice(0, 60))}). Retrying on a clean chat with corrective directive.`);
+        // Retry on a fresh chat (forceBootstrap=true) so the degenerate reply and
+        // corrective directive never pollute the pinned conversation history.
+        const correctedPrompt = `${finalPrompt}\n${buildAnswerDirective()}`;
+        const retried = await obtainStream(correctedPrompt, true);
+        completed = await collectResponse(retried.stream, retried.uiSessionId);
+      }
+
+      releaseUserSlotOnce();
+      return c.json(completed.body, completed.status as any);
     }
 
     return handleStreamingResponse(c, {
-      stream: stream!,
+      stream: acquired.stream,
       completionId,
       model: body.model,
-      uiSessionId,
+      uiSessionId: acquired.uiSessionId,
       hasTools: hasTools && toolChoiceMode !== 'none',
       tools: bodyAny.tools || [],
       finalPrompt,
-      streamOptions: body.stream_options
+      streamOptions: body.stream_options,
+      onComplete: releaseUserSlotOnce,
+      onDegenerateRetry: async () => {
+        console.warn('[Chat] Streaming degenerate reply detected. Regenerating on a clean chat...');
+        const retried = await obtainStream(`${finalPrompt}\n${buildAnswerDirective()}`, true);
+        return { stream: retried.stream, uiSessionId: retried.uiSessionId };
+      },
     });
   } catch (err: any) {
+    releaseUserSlotOnce();
     console.error('Error in chatCompletions:', err)
     const status = err.upstreamStatus || 500
     if (status >= 500) {
@@ -381,15 +525,19 @@ export async function chatCompletions(c: Context) {
 export async function chatCompletionsStop(c: Context) {
   try {
     const body = await c.req.json();
-    const { chat_id, response_id } = body;
+    const { chat_id, response_id, stop_token } = body;
 
-    if (!chat_id || !response_id) {
-      return c.json({ error: 'chat_id and response_id are required' }, 400);
+    if (!chat_id || !response_id || !stop_token) {
+      return c.json({ error: 'chat_id, response_id and stop_token are required' }, 400);
     }
 
     const stream = getStream(chat_id);
     if (!stream) {
       return c.json({ error: 'Stream not found' }, 404);
+    }
+
+    if (!crypto.timingSafeEqual(Buffer.from(stop_token), Buffer.from(stream.stopToken))) {
+      return c.json({ error: 'Invalid stop_token' }, 403);
     }
 
     if (stream.targetResponseId && stream.targetResponseId !== response_id) {

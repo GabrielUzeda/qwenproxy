@@ -1,6 +1,5 @@
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
-import crypto from 'crypto'
 import { config } from '../core/config.js'
 import { metrics } from '../core/metrics.js'
 import { cache } from '../cache/memory-cache.js'
@@ -8,6 +7,7 @@ import { Watchdog } from '../core/watchdog.js'
 import { app as modelsApp } from './models.js'
 import { chatCompletions, chatCompletionsStop } from '../routes/chat.js'
 import { uploadFile } from '../routes/upload.js'
+import { adminApp } from './admin.js'
 import { getBaseAccountId, makeAccountLaneId } from '../core/account-lanes.js'
 
 const app = new Hono()
@@ -51,12 +51,12 @@ app.use('/v1/*', async (c, next) => {
     if (!auth?.startsWith('Bearer ')) {
       return c.json({ error: 'Missing or invalid Authorization header' }, 401)
     }
-    const token = auth.slice(7)
-    const tokenBuf = Buffer.from(token)
-    const keyBuf = Buffer.from(apiKey)
-    if (tokenBuf.length !== keyBuf.length || !crypto.timingSafeEqual(tokenBuf, keyBuf)) {
+    const { resolveUserFromAuthHeader } = await import('../core/user-manager.js')
+    const identity = resolveUserFromAuthHeader(auth)
+    if (!identity) {
       return c.json({ error: 'Invalid API key' }, 401)
     }
+    ;(c as any).set('user', identity)
   }
   await next()
 })
@@ -65,6 +65,9 @@ app.route('', modelsApp)
 app.post('/v1/chat/completions', chatCompletions)
 app.post('/v1/chat/completions/stop', chatCompletionsStop)
 app.post('/v1/upload', uploadFile)
+
+// Admin dashboard (served at /admin).
+app.route('/admin', adminApp)
 
 app.get('/health', async (c) => {
   const status = await watchdog?.getStatus()
@@ -171,6 +174,8 @@ export async function startServer(): Promise<void> {
   watchdog.start()
 
   metrics.startCollection()
+  const { startTimeSeriesSampling, stopTimeSeriesSampling } = await import('../core/time-series.js')
+  startTimeSeriesSampling()
 
   server = serve({
     fetch: app.fetch,
@@ -185,6 +190,7 @@ export async function startServer(): Promise<void> {
     const { stopSessionKeeper } = await import('../services/session-keeper.js')
     stopSessionKeeper()
     watchdog.stop()
+    stopTimeSeriesSampling()
     metrics.stopCollection()
     await cache.close()
     const { closePlaywright } = await import('../services/playwright.js')

@@ -59,6 +59,8 @@ export class MemoryCache {
         }
       }
     }, 60000)
+    // Background maintenance should not keep the process (or test runner) alive.
+    this.cleanupInterval.unref?.()
   }
 
   async connect(): Promise<void> {

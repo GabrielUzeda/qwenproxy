@@ -134,6 +134,60 @@ export function releaseAccountInUse(accountId: string): void {
   inUseAccounts.delete(accountId)
 }
 
+// ---------------------------------------------------------------------------
+// Load-aware scheduling across multiple accounts.
+// The router prefers the account with the fewest actively streaming slots
+// (all lanes of an account share one bucket), and requests that cannot find a
+// free account wait on a signal instead of polling fixed intervals.
+// ---------------------------------------------------------------------------
+
+const accountLoad = new Map<string, number>()
+let freeListeners: Array<() => void> = []
+
+function emitAccountFreed(): void {
+  if (freeListeners.length === 0) return
+  const listeners = freeListeners
+  freeListeners = []
+  for (const resolve of listeners) resolve()
+}
+
+/** Called when a stream begins using an account slot. */
+export function markAccountStreamStart(accountId: string): void {
+  if (!accountId) return
+  const base = getBaseAccountId(accountId) || accountId
+  accountLoad.set(base, (accountLoad.get(base) ?? 0) + 1)
+}
+
+/** Called when a stream ends or fails; wakes a drained waiter. */
+export function markAccountStreamEnd(accountId: string): void {
+  if (!accountId) return
+  const base = getBaseAccountId(accountId) || accountId
+  const load = (accountLoad.get(base) ?? 1) - 1
+  if (load <= 0) accountLoad.delete(base)
+  else accountLoad.set(base, load)
+  emitAccountFreed()
+}
+
+/** Active in-flight stream count for an account (lane-aware base bucket). */
+export function getAccountActiveLoad(accountId?: string): number {
+  if (!accountId) return 0
+  const base = getBaseAccountId(accountId) || accountId
+  return accountLoad.get(base) ?? 0
+}
+
+/** Resolves the next time any account slot frees (replaces blind polling). */
+export function onAccountFreed(): Promise<void> {
+  return new Promise(resolve => {
+    freeListeners.push(resolve)
+  })
+}
+
+export function getAccountById(accountId: string): QwenAccount | null {
+  if (!accountId) return null;
+  const accounts = getAccountsWithCooldownSync()
+  return accounts.find(a => a.id === accountId) ?? null
+}
+
 export function getNextAccount(forceReset?: boolean): QwenAccount | null {
   const accounts = getAccountsWithCooldownSync()
   if (accounts.length === 0) {
@@ -144,12 +198,20 @@ export function getNextAccount(forceReset?: boolean): QwenAccount | null {
     currentIndex = 0
   }
 
+  const viable: QwenAccount[] = []
   for (let i = 0; i < accounts.length; i++) {
     const account = accounts[currentIndex % accounts.length]
     currentIndex = (currentIndex + 1) % accounts.length
     if (!isAccountOnCooldown(account.id) && !isAccountInUse(account.id)) {
-      return account
+      viable.push(account)
     }
+  }
+
+  if (viable.length > 0) {
+    // Prefer the least-loaded account; ties keep round-robin order because
+    // `viable` is collected in rotation order.
+    const minLoad = Math.min(...viable.map(a => getAccountActiveLoad(a.id)))
+    return viable.find(a => getAccountActiveLoad(a.id) === minLoad)!
   }
 
   if (config.accounts.singleAccountMode) {
@@ -180,15 +242,23 @@ export function getNextAvailableAccount(triedAccountIds?: Set<string> | string):
     triedSet = new Set(triedAccountIds ? [triedAccountIds] : [])
   }
 
-  // 1. Try to find an untried account that is NOT on cooldown
+  // 1. Try to find an untried account that is NOT on cooldown, preferring the
+  // least-loaded one (ties keep round-robin order from currentIndex).
+  const candidates: QwenAccount[] = []
   for (let i = 0; i < accounts.length; i++) {
     const idx = (currentIndex + i) % accounts.length
     const account = accounts[idx]
     if (triedSet.has(account.id)) continue
     if (!isAccountOnCooldown(account.id) && !isAccountInUse(account.id)) {
-      currentIndex = (idx + 1) % accounts.length
-      return account
+      candidates.push(account)
     }
+  }
+
+  if (candidates.length > 0) {
+    const minLoad = Math.min(...candidates.map(a => getAccountActiveLoad(a.id)))
+    const chosen = candidates.find(a => getAccountActiveLoad(a.id) === minLoad)!
+    currentIndex = (accounts.indexOf(chosen) + 1) % accounts.length
+    return chosen
   }
 
   if (config.accounts.singleAccountMode) {

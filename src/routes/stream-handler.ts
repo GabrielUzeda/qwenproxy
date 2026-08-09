@@ -4,6 +4,7 @@ import { StreamingToolParser } from '../tools/parser.js';
 import { QwenStreamParser } from '../utils/qwen-stream-parser.js';
 import { getIncrementalDelta, parseQwenErrorPayload } from './sse-parser.js';
 import { looksLikeUnwrappedToolCall, parseUnwrappedToolCalls } from './tool-handler.js';
+import { isDegenerateAnswer } from '../utils/degenerate-answer.js';
 import { removeStream } from '../core/stream-registry.js';
 import { updateSessionParent } from '../services/qwen.js';
 
@@ -16,6 +17,15 @@ export interface StreamHandlerContext {
   tools: any[];
   finalPrompt: string;
   streamOptions?: { include_usage?: boolean };
+  /** Called exactly once when the response stream has fully finished. */
+  onComplete?: () => void;
+  /**
+   * Enables the streaming degenerate-answer guard: all emitted chunks are held
+   * back until either the buffer grows past a threshold or the upstream ends.
+   * If the final answer turns out degenerate ("Yes"), the held bytes are
+   * discarded and the response is re-generated via this hook.
+   */
+  onDegenerateRetry?: () => Promise<{ stream: ReadableStream; uiSessionId: string } | null>;
 }
 
 export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): any {
@@ -39,8 +49,29 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
     const WRITE_FLUSH_BYTES = 8192;
     const WRITE_FLUSH_MS = 3;
 
+    // Streaming degenerate guard: while active, all output is held instead of
+    // being written, and only released once enough content has accumulated or
+    // the upstream stream ends. A degenerate final answer can then be discarded
+    // and regenerated before the client ever sees it.
+    const GUARD_HOLD_BYTES = 800;
+    let guardActive = !!ctx.onDegenerateRetry;
+    let heldOutput = '';
+
+    const releaseGuard = () => {
+      if (!guardActive) return;
+      guardActive = false;
+      if (heldOutput) {
+        writeBuffer = heldOutput + writeBuffer;
+        heldOutput = '';
+      }
+    };
+
     const flushWrites = () => {
       if (writeTimer) { clearTimeout(writeTimer); writeTimer = null; }
+      if (guardActive) {
+        if (heldOutput.length > GUARD_HOLD_BYTES) releaseGuard();
+        return;
+      }
       if (writeBuffer) {
         const data = writeBuffer;
         writeBuffer = '';
@@ -49,6 +80,15 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
     };
 
     const bufferedWrite = (data: string) => {
+      if (guardActive) {
+        heldOutput += data;
+        // Safety: never hold a long answer hostage — release once it is clearly
+        // not a terse degenerate reply.
+        if (heldOutput.length >= GUARD_HOLD_BYTES) {
+          releaseGuard();
+        }
+        return;
+      }
       writeBuffer += data;
       if (writeBuffer.length >= WRITE_FLUSH_BYTES) {
         flushWrites();
@@ -132,12 +172,12 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         object: 'chat.completion.chunk',
         created: createdTimestamp,
         model: ctx.model,
+        session_id: ctx.uiSessionId,
         choices: [makeChoice({ role: 'assistant', content: '' })]
       });
       // Flush the opening role event immediately so clients see the stream begin.
       flushWrites();
 
-      const reader = ctx.stream.getReader();
       const decoder = new TextDecoder();
       let _reasoningBuffer = '';
       let lastFullContent = '';
@@ -146,12 +186,62 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       let targetResponseId: string | null = null;
       let targetResponseIdSet = false;
       let currentThoughtIndex = 0;
-      const toolParser = ctx.hasTools ? new StreamingToolParser(ctx.tools) : null;
-      const bufferChunks: string[] = [];
+      let toolParser = ctx.hasTools ? new StreamingToolParser(ctx.tools) : null;
+      let bufferChunks: string[] = [];
       let bufferLen = 0;
       let lineStart = 0;
       let completionTokens = 0;
       let promptTokens = Math.ceil(ctx.finalPrompt.length / 3.5);
+
+      const resetStreamState = () => {
+        _reasoningBuffer = '';
+        lastFullContent = '';
+        contentLength = 0;
+        contentSuffix = '';
+        targetResponseId = null;
+        targetResponseIdSet = false;
+        currentThoughtIndex = 0;
+        toolParser = ctx.hasTools ? new StreamingToolParser(ctx.tools) : null;
+        bufferChunks = [];
+        bufferLen = 0;
+        lineStart = 0;
+        completionTokens = 0;
+        promptTokens = Math.ceil(ctx.finalPrompt.length / 3.5);
+        firstPayloadFlushed = false;
+        heldOutput = '';
+        guardActive = !!ctx.onDegenerateRetry;
+      };
+
+      const readUpstream = async (stream: ReadableStream) => {
+        const reader = stream.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const decoded = decoder.decode(value, { stream: true });
+          bufferChunks.push(decoded);
+          bufferLen += decoded.length;
+
+          if (decoded.includes('\n')) {
+            const fullBuffer = bufferChunks.length === 1 ? bufferChunks[0] : bufferChunks.join('');
+            processLines(fullBuffer);
+
+            const remaining = fullBuffer.substring(lineStart);
+            bufferChunks.length = 0;
+            if (remaining) {
+              bufferChunks.push(remaining);
+              bufferLen = remaining.length;
+            } else {
+              bufferLen = 0;
+            }
+            lineStart = 0;
+          }
+        }
+
+        if (bufferLen > 0) {
+          const finalBuffer = bufferChunks.length === 1 ? bufferChunks[0] : bufferChunks.join('');
+          processLines(finalBuffer);
+        }
+      };
 
       const processLines = (fullBuffer: string) => {
         let pos = lineStart;
@@ -260,33 +350,28 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         lineStart = pos;
       };
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const decoded = decoder.decode(value, { stream: true });
-        bufferChunks.push(decoded);
-        bufferLen += decoded.length;
+      await readUpstream(ctx.stream);
 
-        if (decoded.includes('\n')) {
-          const fullBuffer = bufferChunks.length === 1 ? bufferChunks[0] : bufferChunks.join('');
-          processLines(fullBuffer);
-
-          const remaining = fullBuffer.substring(lineStart);
-          bufferChunks.length = 0;
-          if (remaining) {
-            bufferChunks.push(remaining);
-            bufferLen = remaining.length;
-          } else {
-            bufferLen = 0;
-          }
-          lineStart = 0;
+      // Degenerate-answer guard: if the entire response is a terse
+      // acknowledgment, discard the held bytes and regenerate once with a
+      // corrective directive before the client ever sees it.
+      if (
+        guardActive &&
+        ctx.onDegenerateRetry &&
+        emittedStreamingToolIds.size === 0 &&
+        isDegenerateAnswer(lastFullContent)
+      ) {
+        console.warn(`[Chat] Streaming degenerate reply detected (${JSON.stringify(lastFullContent.slice(0, 40))}). Regenerating...`);
+        const retried = await ctx.onDegenerateRetry();
+        if (retried) {
+          ctx.uiSessionId = retried.uiSessionId;
+          resetStreamState();
+          await readUpstream(retried.stream);
         }
       }
 
-      if (bufferLen > 0) {
-        const finalBuffer = bufferChunks.length === 1 ? bufferChunks[0] : bufferChunks.join('');
-        processLines(finalBuffer);
-      }
+      // Flush whatever survived (the real answer or the fallback).
+      releaseGuard();
 
       const tailBuffer = bufferChunks.length > 0
         ? (bufferChunks.length === 1 ? bufferChunks[0] : bufferChunks.join('')).substring(lineStart)
@@ -353,6 +438,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         object: 'chat.completion.chunk',
         created: createdTimestamp,
         model: ctx.model,
+        session_id: ctx.uiSessionId,
         choices: [makeChoice({}, finalFinishReason)],
         ...(ctx.streamOptions?.include_usage ? {} : { usage })
       });
@@ -373,8 +459,140 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       flushWrites();
       clearInterval(heartbeatInterval);
       removeStream(ctx.completionId);
+      ctx.onComplete?.();
     }
   });
+}
+
+export interface NonStreamingResult {
+  status: number;
+  body: any;
+  content: string;
+  toolCalls: any[];
+  degenerate: boolean;
+}
+
+/**
+ * Reads a completed (non-streaming) upstream response and returns both the
+ * final body and the raw assistant content so callers can detect degenerate
+ * replies ("Yes") and retry with a corrective directive.
+ */
+export async function collectNonStreamingResult(
+  c: Context,
+  stream: ReadableStream,
+  completionId: string,
+  model: string,
+  uiSessionId: string,
+  hasTools: boolean,
+  tools: any[],
+  onComplete?: () => void,
+): Promise<NonStreamingResult> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  const toolCallsOut: any[] = [];
+  const seenToolCallIds = new Set<string>();
+  let buffer = '';
+  let completed = false;
+  const completeOnce = () => {
+    if (completed) return;
+    completed = true;
+    onComplete?.();
+  };
+
+  const pushToolCall = (tc: { id: string; name: string; arguments: Record<string, unknown> }) => {
+    if (seenToolCallIds.has(tc.id)) return;
+    seenToolCallIds.add(tc.id);
+    toolCallsOut.push({
+      id: tc.id,
+      type: 'function',
+      function: { name: tc.name, arguments: JSON.stringify(tc.arguments) }
+    });
+  };
+
+  const qwenParser = new QwenStreamParser(uiSessionId, {
+    tools: hasTools ? tools : [],
+    onThinking: () => {},
+    onToolCall: (tc) => {
+      pushToolCall(tc);
+    },
+  });
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith('data: ')) continue;
+      const dataStr = trimmed.slice(6);
+      if (dataStr === '[DONE]') continue;
+      qwenParser.parseLine(dataStr);
+    }
+  }
+
+  const upstreamError = parseQwenErrorPayload(buffer);
+  if (upstreamError) {
+    removeStream(completionId);
+    completeOnce();
+    return {
+      status: upstreamError.status,
+      body: { error: { message: upstreamError.message } },
+      content: '',
+      toolCalls: [],
+      degenerate: false,
+    };
+  }
+
+  const { text: remainingText, toolCalls: remainingToolCalls } = qwenParser.flush();
+  const parserState = qwenParser.state;
+  let finalContent = parserState.lastFullContent;
+  if (remainingText) finalContent += remainingText;
+  for (const tc of remainingToolCalls) {
+    pushToolCall(tc);
+  }
+
+  if (hasTools && toolCallsOut.length === 0) {
+    for (const tc of parseUnwrappedToolCalls(finalContent)) {
+      pushToolCall(tc);
+    }
+    if (toolCallsOut.length > 0) finalContent = '';
+  }
+
+  const usage = {
+    prompt_tokens: parserState.promptTokens,
+    completion_tokens: parserState.completionTokens,
+    total_tokens: parserState.promptTokens + parserState.completionTokens,
+    prompt_tokens_details: { cached_tokens: 0 }
+  };
+  const message: any = { role: 'assistant', content: toolCallsOut.length ? null : finalContent };
+  if (parserState.reasoningBuffer) message.reasoning_content = parserState.reasoningBuffer;
+  if (toolCallsOut.length) toolCallsOut.forEach((tc, idx) => tc.index = idx);
+  if (toolCallsOut.length) message.tool_calls = toolCallsOut;
+
+  removeStream(completionId);
+  completeOnce();
+  return {
+    status: 200,
+    body: {
+      id: completionId,
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
+      model,
+      session_id: uiSessionId,
+      choices: [{
+        index: 0,
+        message,
+        logprobs: null,
+        finish_reason: toolCallsOut.length ? 'tool_calls' : 'stop'
+      }],
+      usage
+    },
+    content: finalContent,
+    toolCalls: toolCallsOut,
+    degenerate: toolCallsOut.length === 0 && isDegenerateAnswer(finalContent),
+  };
 }
 
 export function handleNonStreamingResponse(
@@ -387,90 +605,7 @@ export function handleNonStreamingResponse(
   tools: any[],
 ): any {
   return (async () => {
-    const reader = stream.getReader();
-    const decoder = new TextDecoder();
-    const toolCallsOut: any[] = [];
-    const seenToolCallIds = new Set<string>();
-    let buffer = '';
-
-    const pushToolCall = (tc: { id: string; name: string; arguments: Record<string, unknown> }) => {
-      if (seenToolCallIds.has(tc.id)) return;
-      seenToolCallIds.add(tc.id);
-      toolCallsOut.push({
-        id: tc.id,
-        type: 'function',
-        function: { name: tc.name, arguments: JSON.stringify(tc.arguments) }
-      });
-    };
-
-    const qwenParser = new QwenStreamParser(uiSessionId, {
-      tools: hasTools ? tools : [],
-      onThinking: () => {},
-      onToolCall: (tc) => {
-        pushToolCall(tc);
-      },
-    });
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('data: ')) continue;
-        const dataStr = trimmed.slice(6);
-        if (dataStr === '[DONE]') continue;
-        qwenParser.parseLine(dataStr);
-      }
-    }
-
-    const upstreamError = parseQwenErrorPayload(buffer);
-    if (upstreamError) {
-      removeStream(completionId);
-      return c.json({ error: { message: upstreamError.message } }, upstreamError.status as any);
-    }
-
-    const { text: remainingText, toolCalls: remainingToolCalls } = qwenParser.flush();
-    const parserState = qwenParser.state;
-    let finalContent = parserState.lastFullContent;
-    if (remainingText) finalContent += remainingText;
-    for (const tc of remainingToolCalls) {
-      pushToolCall(tc);
-    }
-
-    if (hasTools && toolCallsOut.length === 0) {
-      for (const tc of parseUnwrappedToolCalls(finalContent)) {
-        pushToolCall(tc);
-      }
-      if (toolCallsOut.length > 0) finalContent = '';
-    }
-
-    const usage = {
-      prompt_tokens: parserState.promptTokens,
-      completion_tokens: parserState.completionTokens,
-      total_tokens: parserState.promptTokens + parserState.completionTokens,
-      prompt_tokens_details: { cached_tokens: 0 }
-    };
-    const message: any = { role: 'assistant', content: toolCallsOut.length ? null : finalContent };
-    if (parserState.reasoningBuffer) message.reasoning_content = parserState.reasoningBuffer;
-    if (toolCallsOut.length) toolCallsOut.forEach((tc, idx) => tc.index = idx);
-    if (toolCallsOut.length) message.tool_calls = toolCallsOut;
-
-    removeStream(completionId);
-    return c.json({
-      id: completionId,
-      object: 'chat.completion',
-      created: Math.floor(Date.now() / 1000),
-      model,
-      choices: [{
-        index: 0,
-        message,
-        logprobs: null,
-        finish_reason: toolCallsOut.length ? 'tool_calls' : 'stop'
-      }],
-      usage
-    });
+    const result = await collectNonStreamingResult(c, stream, completionId, model, uiSessionId, hasTools, tools);
+    return c.json(result.body, result.status as any);
   })();
 }

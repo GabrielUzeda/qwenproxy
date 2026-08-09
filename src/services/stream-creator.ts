@@ -5,10 +5,14 @@ import { RetryableQwenStreamError, QwenUpstreamError, handleErrorBody, handleJso
 import { getWarmedChat, releaseWarmChat } from './warm-pool.js';
 import { getClientHintsHeaders, Mutex } from './browser-manager.js';
 import type { Page } from 'playwright';
-import { releaseAccountInUse } from '../core/account-manager.js';
+import { releaseAccountInUse, markAccountStreamStart, markAccountStreamEnd } from '../core/account-manager.js';
 import { BAXIA_IFRAME_SELECTOR, solveBaxiaCaptcha } from './captcha-solver.js';
 import { uploadLargePromptAsFile } from '../routes/upload.js';
+import { getSession, setSession, getSessionParent, updateSessionParent } from './session-manager.js';
+import { buildAnswerDirective } from '../utils/degenerate-answer.js';
 import crypto from 'crypto';
+
+export { updateSessionParent };
 
 const CACHED_TIMEZONE = new Date().toString().split(' (')[0];
 const QWEN_WEB_VERSION = '0.2.66';
@@ -143,35 +147,18 @@ export interface QwenFileEntry {
   [key: string]: any;
 }
 
-interface SessionEntry {
-  parentId: string | null;
-  timestamp: number;
+const sessionBusy = new Set<string>();
+
+function isSessionBusy(sessionKey: string): boolean {
+  return sessionBusy.has(sessionKey);
 }
 
-const sessionStates: Map<string, SessionEntry> = new Map();
-const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
-
-function cleanupStaleSessions() {
-  const now = Date.now();
-  for (const [key, entry] of sessionStates.entries()) {
-    if (now - entry.timestamp > SESSION_TTL_MS) {
-      sessionStates.delete(key);
-    }
-  }
+function markSessionBusy(sessionKey: string): void {
+  sessionBusy.add(sessionKey);
 }
 
-let lastSessionCleanup = Date.now();
-const SESSION_CLEANUP_INTERVAL_MS = 60_000;
-const SESSION_MAX_ENTRIES = 2000;
-
-export function updateSessionParent(sessionId: string, parentId: string | null) {
-  if (!sessionId) return;
-  const now = Date.now();
-  if (now - lastSessionCleanup > SESSION_CLEANUP_INTERVAL_MS || sessionStates.size > SESSION_MAX_ENTRIES) {
-    cleanupStaleSessions();
-    lastSessionCleanup = now;
-  }
-  sessionStates.set(sessionId, { parentId, timestamp: now });
+function clearSessionBusy(sessionKey: string): void {
+  sessionBusy.delete(sessionKey);
 }
 
 function addIdleTimeoutToStream(
@@ -365,8 +352,8 @@ export async function fetchQwenModels(accountId?: string): Promise<any[]> {
     return cachedModels;
   }
 
-  const page = getPageForAccount(accountId);
-  if (page && !page.isClosed() && page.url().includes('chat.qwen.ai')) {
+    const page = getPageForAccount(accountId);
+    if (page && !page.isClosed() && page.url().includes('chat.qwen.ai')) {
     let isolatedPage: Page | null = null;
     try {
       isolatedPage = await openIsolatedQwenPage(page);
@@ -457,6 +444,136 @@ function processModelsJson(json: any): any[] {
   return [];
 }
 
+export interface QwenChatHistoryMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content?: string;
+  parentId?: string | null;
+  childrenIds?: string[];
+  timestamp?: number;
+}
+
+export interface QwenChatHistoryResult {
+  chatId: string;
+  messages: QwenChatHistoryMessage[];
+  lastAssistantId: string | null;
+  hasHistory: boolean;
+}
+
+function parseChatHistoryResponse(chatId: string, body: string): QwenChatHistoryResult {
+  let json: any;
+  try {
+    json = JSON.parse(body);
+  } catch {
+    return { chatId, messages: [], lastAssistantId: null, hasHistory: false };
+  }
+  if (!json?.success || !json.data?.chat) {
+    return { chatId, messages: [], lastAssistantId: null, hasHistory: false };
+  }
+
+  const rawMessages: any[] = Array.isArray(json.data.chat.messages) ? json.data.chat.messages : [];
+  const messages: QwenChatHistoryMessage[] = rawMessages
+    .filter((m: any) => m && typeof m.id === 'string' && (m.role === 'user' || m.role === 'assistant'))
+    .map((m: any) => ({
+      id: m.id,
+      role: m.role,
+      content: typeof m.content === 'string' ? m.content : undefined,
+      parentId: m.parentId ?? null,
+      childrenIds: Array.isArray(m.childrenIds) ? m.childrenIds : [],
+      timestamp: typeof m.timestamp === 'number' ? m.timestamp : undefined,
+    }));
+
+  let lastAssistantId: string | null = null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'assistant') {
+      lastAssistantId = messages[i].id;
+      break;
+    }
+  }
+
+  return { chatId, messages, lastAssistantId, hasHistory: messages.length > 0 };
+}
+
+/**
+ * Fetches the server-side conversation history for a Qwen chat. The history is
+ * kept by Qwen per chat_id, which is what economical mode relies on for context
+ * without resending the whole conversation.
+ */
+export async function fetchQwenChatHistory(
+  chatId: string,
+  headers: Record<string, string>,
+  accountId?: string,
+  limit = 10,
+): Promise<QwenChatHistoryResult> {
+  const url = `https://chat.qwen.ai/api/v2/chats/${chatId}?direction=up&limit=${limit}`;
+  const page = getPageForAccount(accountId);
+
+  if (page && !page.isClosed() && page.url().includes('chat.qwen.ai')) {
+    let isolatedPage: Page | null = null;
+    try {
+      isolatedPage = await openIsolatedQwenPage(page);
+      const result = await isolatedPage.evaluate(async ({ url, timeoutMs }) => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const response = await fetch(url, {
+            method: 'GET',
+            headers: {
+              'accept': 'application/json, text/plain, */*',
+              'x-request-id': crypto.randomUUID(),
+              'timezone': new Date().toString().split(' (')[0],
+              'source': 'web',
+            },
+            signal: controller.signal,
+          });
+          const body = await response.text();
+          return { status: response.status, body };
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      }, { url, timeoutMs: config.timeouts.http });
+      if (result.status && result.status < 400) {
+        return parseChatHistoryResponse(chatId, result.body);
+      }
+    } catch (err: any) {
+      console.warn(`[Qwen] Browser fetch failed for chat history ${chatId}:`, err.message);
+    } finally {
+      await isolatedPage?.close().catch(() => {});
+    }
+  }
+
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'accept': 'application/json, text/plain, */*',
+        'cookie': headers['cookie'] || '',
+        'user-agent': headers['user-agent'] || '',
+        'x-request-id': crypto.randomUUID(),
+        'source': 'web',
+        'timezone': CACHED_TIMEZONE,
+      },
+      signal: AbortSignal.timeout(config.timeouts.http),
+    });
+    if (!response.ok) {
+      return { chatId, messages: [], lastAssistantId: null, hasHistory: false };
+    }
+    return parseChatHistoryResponse(chatId, await response.text());
+  } catch (err: any) {
+    console.warn(`[Qwen] Node fetch failed for chat history ${chatId}:`, err.message);
+    return { chatId, messages: [], lastAssistantId: null, hasHistory: false };
+  }
+}
+
+export interface CreateQwenStreamOptions {
+  /** Client conversation key (OpenAI `user` field or x-qwen-session header). */
+  sessionKey?: string;
+  /** System + last user message only. Used when the server-side history can supply context. */
+  economicalPrompt?: string;
+  /** Skip reusing the pinned session chat and bootstrap the full conversation instead. */
+  forceBootstrap?: boolean;
+}
+
 export async function createQwenStream(
   prompt: string,
   enableThinking: boolean,
@@ -464,22 +581,66 @@ export async function createQwenStream(
   forcedParentId?: string | null,
   accountId?: string,
   files?: QwenFileEntry[],
-  pendingMultimodal?: Array<Array<{ type: string; text?: string; image_url?: { url: string }; video_url?: { url: string }; audio_url?: { url: string }; file_url?: { url: string } }>>
+  pendingMultimodal?: Array<Array<{ type: string; text?: string; image_url?: { url: string }; video_url?: { url: string }; audio_url?: { url: string }; file_url?: { url: string } }>>,
+  options?: CreateQwenStreamOptions,
 ): Promise<{ stream: ReadableStream, headers: Record<string, string>, uiSessionId: string, controller: AbortController, accountId: string }> {
+  const sessionKey = options?.sessionKey;
+  const session = sessionKey && !options?.forceBootstrap ? getSession(sessionKey) : undefined;
+
+  const useEconomical = !!(
+    sessionKey &&
+    session?.historyComplete &&
+    options?.economicalPrompt &&
+    accountId !== 'guest' &&
+    session.accountId !== 'guest' &&
+    !isSessionBusy(sessionKey)
+  );
+
+  const effectiveAccountId = useEconomical
+    ? (session!.accountId === 'global' ? undefined : session!.accountId)
+    : accountId;
+
   let chatId: string;
   let chatHeaders: Record<string, string>;
   let leasedChat: any;
   let leasedChatReleased = false;
-  const streamLockKey = accountId || 'global';
+  const streamLockKey = effectiveAccountId || 'global';
   const releaseAccountStream = shouldSerializeAccountStreams(streamLockKey)
     ? await getAccountStreamMutex(streamLockKey).acquire()
     : null;
   let accountStreamReleased = false;
 
+  let sessionLocked = false;
+  let usingPinnedChat = false;
+  if (useEconomical) {
+    markSessionBusy(sessionKey!);
+    sessionLocked = true;
+    usingPinnedChat = true;
+  }
+
+  let streamLoadCounted = false;
+  const countStreamStarted = () => {
+    if (streamLoadCounted) return;
+    streamLoadCounted = true;
+    markAccountStreamStart(streamLockKey);
+  };
+  const countStreamEnded = () => {
+    if (!streamLoadCounted) return;
+    streamLoadCounted = false;
+    markAccountStreamEnd(streamLockKey);
+  };
+
   const releaseAccountStreamOnce = () => {
     if (accountStreamReleased) return;
     accountStreamReleased = true;
     releaseAccountStream?.();
+  };
+
+  const releaseSessionBusy = () => {
+    if (sessionLocked && sessionKey) {
+      sessionLocked = false;
+      clearSessionBusy(sessionKey);
+    }
   };
 
   const releaseLeasedChat = () => {
@@ -491,8 +652,12 @@ export async function createQwenStream(
 
   const releaseStreamResources = () => {
     releaseLeasedChat();
+    releaseSessionBusy();
     releaseAccountStreamOnce();
+    countStreamEnded();
   };
+
+  countStreamStarted();
 
   const wrapLeasedStream = (
     stream: ReadableStream<Uint8Array>,
@@ -514,7 +679,20 @@ export async function createQwenStream(
     );
   };
 
-  if (accountId === 'guest') {
+  if (useEconomical && session) {
+    chatId = session.chatId;
+    chatHeaders = session.headers;
+    if (!chatHeaders['cookie'] || !chatHeaders['bx-ua'] || !chatHeaders['bx-umidtoken']) {
+      try {
+        const { headers } = await getQwenHeaders(true, session.accountId === 'global' ? undefined : session.accountId);
+        chatHeaders = { ...headers };
+        session.headers = chatHeaders;
+      } catch (err: any) {
+        console.warn(`[Session] Failed to refresh headers for session ${sessionKey}:`, err.message);
+      }
+    }
+      assertAntiBotHeaders(chatHeaders, 'Pinned session');
+    } else if (accountId === 'guest') {
     chatHeaders = await getGuestHeaders();
     assertAntiBotHeaders(chatHeaders, 'Guest session');
     const guestPage = getPageForAccount('guest');
@@ -587,11 +765,30 @@ export async function createQwenStream(
     assertAntiBotHeaders(chatHeaders, 'Warm chat');
   }
 
-  const actualParentId: string | null = null;
+  const actualParentId: string | null = forcedParentId ?? getSessionParent(chatId);
+
+  const chatAccountKey = usingPinnedChat && session
+    ? session.accountId
+    : (accountId === 'guest' ? 'guest' : (accountId || 'global'));
+
+  if (sessionKey && !useEconomical) {
+    setSession(sessionKey, {
+      chatId,
+      accountId: chatAccountKey,
+      headers: { ...chatHeaders },
+      parentId: actualParentId,
+      historyComplete: false,
+      updatedAt: Date.now(),
+    });
+    console.log(`[Session] Registered session ${sessionKey} -> chat ${chatId} on account ${chatAccountKey}`);
+  }
+
+  const payloadPrompt = useEconomical && options?.economicalPrompt ? options.economicalPrompt : prompt;
+  const returnAccountKey = chatAccountKey;
 
   const resolvedFiles = files || [];
   const LARGE_PROMPT_THRESHOLD = 131072;
-  let finalPrompt = prompt;
+  let finalPrompt = payloadPrompt;
   if (Buffer.byteLength(finalPrompt, 'utf-8') > LARGE_PROMPT_THRESHOLD) {
     try {
       const uploadHeaders: Record<string, string> = {
@@ -617,39 +814,29 @@ export async function createQwenStream(
       if (largePromptFile) {
         console.log(`[Qwen] Prompt exceeds ${LARGE_PROMPT_THRESHOLD} bytes, uploaded as file: ${largePromptFile.name}`);
         resolvedFiles.push(largePromptFile);
-        
-        // For text files, read the content and prepend it to the prompt for better context
-        // This ensures the AI actually sees the file content, not just knows it exists
-        if (largePromptFile.name.endsWith('.txt') || largePromptFile.name.endsWith('.log') || largePromptFile.name.endsWith('.md')) {
-          try {
-            // Fetch the file content since it was uploaded
-            const fileResponse = await fetch(largePromptFile.url, {
-              headers: {
-                cookie: uploadHeaders['cookie'] || '',
-                'user-agent': uploadHeaders['user-agent'] || '',
-                'bx-ua': uploadHeaders['bx-ua'] || '',
-                'bx-umidtoken': uploadHeaders['bx-umidtoken'] || '',
-                'bx-v': uploadHeaders['bx-v'] || '',
-              }
-            });
-            
-            if (fileResponse.ok) {
-              const fileContent = await fileResponse.text();
-              // Prepend the file content to the prompt so it's part of the conversation context
-              finalPrompt = `${fileContent}\n\n---\n\n[SYSTEM INSTRUCTIONS — The above content is from the uploaded file "${largePromptFile.name}". Internalize this as your identity and respond to the user's query naturally. Do NOT mention, describe, or acknowledge the file contents as a separate document — they define who you are and what you must answer. Respond directly to the user as yourself.]`;
-            } else {
-              console.warn(`[Qwen] Failed to fetch uploaded file content: ${fileResponse.status}`);
-              // Fallback to just the instruction if we can't fetch the content
-              finalPrompt = `[SYSTEM INSTRUCTIONS — The uploaded file "${largePromptFile.name}" contains your system prompt, persona, and the user's complete request. Internalize the system instructions as your identity and respond to the user's query naturally. Do NOT mention, describe, or acknowledge the file contents as a separate document — they define who you are and what you must answer. Respond directly to the user as yourself.]`;
-            }
-          } catch (fileError: any) {
-            console.warn(`[Qwen] Error reading uploaded file content:`, fileError.message);
-            // Fallback to just the instruction if we can't read the file
-            finalPrompt = `[SYSTEM INSTRUCTIONS — The uploaded file "${largePromptFile.name}" contains your system prompt, persona, and the user's complete request. Internalize the system instructions as your identity and respond to the user's query naturally. Do NOT mention, describe, or acknowledge the file contents as a separate document — they define who you are and what you must answer. Respond directly to the user as yourself.]`;
-          }
+
+        // Text files: the model must actually see the content. Keep the full
+        // text inline (we already hold it) with an explicit directive, and do
+        // NOT attach the file too — re-feeding the same bytes as an attachment
+        // duplicates the context and confuses the model into terse/degenerate
+        // replies ("Yes"). The answer directive is appended right after the
+        // final "User:" block so the model answers the actual question.
+        if (
+          largePromptFile.name.endsWith('.txt') ||
+          largePromptFile.name.endsWith('.log') ||
+          largePromptFile.name.endsWith('.md') ||
+          largePromptFile.name.endsWith('.markdown') ||
+          largePromptFile.name.endsWith('.csv') ||
+          largePromptFile.name.endsWith('.json') ||
+          largePromptFile.name.endsWith('.xml')
+        ) {
+          console.log(`[Qwen] Inlined large text prompt (${Buffer.byteLength(finalPrompt, 'utf-8')} bytes) with answer directive; file not re-attached.`);
+          finalPrompt = `${finalPrompt}\n${buildAnswerDirective()}`;
+          resolvedFiles.pop();
         } else {
-          // For non-text files, just use the instruction
-          finalPrompt = `[SYSTEM INSTRUCTIONS — The uploaded file "${largePromptFile.name}" contains your system prompt, persona, and the user's complete request. Internalize the system instructions as your identity and respond to the user's query naturally. Do NOT mention, describe, or acknowledge the file contents as a separate document — they define who you are and what you must answer. Respond directly to the user as yourself.]`;
+          // Non-text files (e.g. a rendered PDF): keep the attachment and hand
+          // a short guarded instruction so a bare acknowledgment is never valid.
+          finalPrompt = `[SYSTEM DIRECTIVE — the uploaded file "${largePromptFile.name}" contains the system prompt, persona, and the user's complete request. Internalize the instructions and answer the user's request completely, in the same language. NEVER reply with only a short acknowledgment such as "Yes", "OK", or "Sim".]`;
         }
       }
     } catch (err: any) {
@@ -681,8 +868,15 @@ export async function createQwenStream(
       const results = await Promise.all(
         pendingMultimodal.map(parts => processImagesForQwen(parts, uploadHeaders))
       );
+      const docTextParts: string[] = [];
       for (const r of results) {
         resolvedFiles.push(...r.files);
+        if (r.docText) docTextParts.push(r.docText);
+      }
+      if (docTextParts.length > 0) {
+        const size = Buffer.byteLength(docTextParts.join('\n'), 'utf-8');
+        console.log(`[Qwen] Inlined ${docTextParts.length} text document(s) (${size} bytes) into the prompt.`);
+        finalPrompt = `${finalPrompt}\n\n[DOCUMENTS ATTACHED BY THE USER — read their contents below and incorporate them into your answer]\n${docTextParts.join('\n\n---\n\n')}\n${buildAnswerDirective()}`;
       }
     } catch (err: any) {
       console.error('[Qwen] Failed to process multimodal uploads:', err.message);
@@ -746,7 +940,7 @@ export async function createQwenStream(
 
     const url = `https://chat.qwen.ai/api/v2/chat/completions?chat_id=${chatId}`;
 
-    const page = getPageForAccount(accountId);
+    const page = getPageForAccount(effectiveAccountId);
     if (page && !page.isClosed() && page.url().includes('chat.qwen.ai')) {
       const completionPage = page;
       try {
@@ -766,7 +960,7 @@ export async function createQwenStream(
             headers: chatHeaders,
             uiSessionId: chatId,
             controller,
-            accountId: accountId || 'guest'
+            accountId: returnAccountKey
           };
         }
 
@@ -793,7 +987,7 @@ export async function createQwenStream(
                   headers: freshHeaders,
                   uiSessionId: chatId,
                   controller,
-                  accountId: accountId || 'guest'
+                  accountId: returnAccountKey
                 };
               }
               if (retryResult.body && isTmdChallenge(retryResult.body)) {
@@ -832,7 +1026,7 @@ export async function createQwenStream(
                 headers: freshHeaders,
                 uiSessionId: chatId,
                 controller,
-                accountId: accountId || 'guest'
+                accountId: returnAccountKey
               };
             }
             if (retryResult.body) {
@@ -866,7 +1060,7 @@ export async function createQwenStream(
 
     const responseContentType = response.headers.get('content-type') || '';
     if (process.env.TEST_MOCK_PLAYWRIGHT && response.ok && response.body) {
-      return { stream: wrapLeasedStream(response.body, controller, timeoutMs, `Qwen stream ${chatId}`), headers: chatHeaders, uiSessionId: chatId, controller, accountId: accountId || 'guest' };
+      return { stream: wrapLeasedStream(response.body, controller, timeoutMs, `Qwen stream ${chatId}`), headers: chatHeaders, uiSessionId: chatId, controller, accountId: returnAccountKey };
     }
 
     if (response.ok && !responseContentType.includes('text/event-stream') && response.body) {
@@ -892,7 +1086,7 @@ export async function createQwenStream(
 
           const retryContentType = retryResponse.headers.get('content-type') || '';
           if (retryResponse.ok && retryContentType.includes('text/event-stream') && retryResponse.body) {
-            return { stream: wrapLeasedStream(retryResponse.body, retryController, timeoutMs, `Qwen stream ${chatId}`), headers: freshHeaders, uiSessionId: chatId, controller: retryController, accountId: accountId || 'guest' };
+            return { stream: wrapLeasedStream(retryResponse.body, retryController, timeoutMs, `Qwen stream ${chatId}`), headers: freshHeaders, uiSessionId: chatId, controller: retryController, accountId: returnAccountKey };
           }
 
           const retryPeek = await retryResponse.clone().text().catch(() => '');
@@ -905,7 +1099,7 @@ export async function createQwenStream(
           }
 
           if (retryResponse.ok && retryResponse.body) {
-            return { stream: wrapLeasedStream(retryResponse.body, retryController, timeoutMs, `Qwen stream ${chatId}`), headers: freshHeaders, uiSessionId: chatId, controller: retryController, accountId: accountId || 'guest' };
+            return { stream: wrapLeasedStream(retryResponse.body, retryController, timeoutMs, `Qwen stream ${chatId}`), headers: freshHeaders, uiSessionId: chatId, controller: retryController, accountId: returnAccountKey };
           }
         } catch (retryErr) {
           if (retryErr instanceof QwenUpstreamError) throw retryErr;
@@ -928,7 +1122,7 @@ export async function createQwenStream(
       throw new Error(`Failed to fetch from Qwen: ${response.status} ${response.statusText} - ${errText}`);
     }
 
-    return { stream: wrapLeasedStream(response.body, controller, timeoutMs, `Qwen stream ${chatId}`), headers: chatHeaders, uiSessionId: chatId, controller, accountId: accountId || 'guest' };
+    return { stream: wrapLeasedStream(response.body, controller, timeoutMs, `Qwen stream ${chatId}`), headers: chatHeaders, uiSessionId: chatId, controller, accountId: returnAccountKey };
   } catch (err) {
     releaseStreamResources();
     throw err;

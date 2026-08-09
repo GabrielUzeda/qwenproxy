@@ -210,6 +210,83 @@ curl http://localhost:3000/v1/chat/completions \
   }'
 ```
 
+## Sessões híbridas (economia de contexto) e upload de arquivos .txt
+
+Para conversas longas o proxy usa a **estrutura híbrida**: a primeira mensagem de
+uma conversa envia o histórico completo (bootstrap); a partir daí, apenas o
+`system` + a última mensagem do usuário são enviados, aproveitando o histórico
+que o Qwen mantém do lado do servidor para o mesmo `chat_id` (com threading via
+`parent_id`).
+
+Para ativar, informe a mesma chave de sessão em todas as mensagens da conversa,
+usando o campo OpenAI `user` (ou o header `x-qwen-session`):
+
+```typescript
+const completion = await openai.chat.completions.create({
+  model: 'qwen-plus',
+  user: 'minha-conversa-123',
+  messages: [/* histórico completo da conversa */]
+});
+
+// A resposta expõe `session_id` (o chat_id no Qwen). Você pode continuar a
+// conversa passando esse valor de volta no campo `user`.
+console.log(completion.session_id);
+```
+
+- **Turno 1** de uma sessão: `parent_id = null`, histórico completo enviado.
+- **Turnos seguintes**: apenas `User: <última mensagem>` com `parent_id` apontando
+  para a última resposta, o que reduz drasticamente os tokens enviados.
+- Sem chave de sessão o proxy mantém o comportamento original (envia o histórico
+  completo, mas ainda encadeia as mensagens com `parent_id`).
+- Quando a conversa envolve `tools` ou multimodal, o modo econômico é desativado
+  automaticamente e o histórico completo é sempre enviado.
+
+**Arquivos de texto (.txt/.md/.csv/...)** enviados pelo usuário ou prompts
+grandes são **embutidos no texto da mensagem** (para o modelo sempre ver o
+conteúdo) com uma diretiva explícita de resposta completa. Respostas degeneradas
+(apenas "Yes", "Ok", "Sim") são detectadas e, no modo não-streaming, a requisição
+é refeita uma vez com uma diretiva corretiva — nunca são entregues como resposta
+final.
+
+Configuração (`.env`):
+
+```
+HYBRID_SESSIONS_ENABLED=true
+HYBRID_SESSION_VERIFY=false   # true = verifica o histórico no servidor antes de reusar (1 request extra)
+HYBRID_SESSION_TTL_MS=86400000
+```
+
+## Dashboard de administração
+
+Acesse `http://localhost:3000/admin` para gerenciar o projeto em uma única tela
+— frontend **React + shadcn/ui** (pasta `web/`):
+
+- **Visão geral** — KPIs e **gráficos em tempo real** (requisições/min, latência,
+  streams ativos, memória RSS, erros e sessões — amostras a cada 5s em janela de 20min),
+  carga por conta e warm pool.
+- **Contas** — adicionar/remover contas Qwen, limpar cooldown e forçar refresh
+  de headers.
+- **API Keys** — criar/editar/remover usuários, regenerar chaves e ajustar RPM e
+  concorrência por usuário.
+- **Configuração** — editar as variáveis essenciais do `.env` (com validação),
+  baixar métricas em Prometheus e reiniciar o servidor.
+- **Métricas** — saída Prometheus completa do `/metrics`.
+
+**Build do frontend** (necessário quando a pasta `web/dist` não existir; o servidor
+usa um painel inline simples como fallback):
+
+```bash
+npm --prefix web install
+npm --prefix web run build   # ou: npm run build:admin
+```
+
+Autenticação: defina `ADMIN_PASSWORD` no `.env` (ou deixe em branco para usar a
+`API_KEY`). A sessão usa cookie HttpOnly assinado.
+
+```
+ADMIN_PASSWORD=
+```
+
 ---
 
 ## Deploy com Docker

@@ -6,6 +6,7 @@ const activeStreams = new Map<string, {
   uiSessionId: string;
   targetResponseId: string;
   headers: Record<string, string>;
+  stopToken: string;
 }>();
 
 export function registerStream(key: string, entry: {
@@ -14,6 +15,7 @@ export function registerStream(key: string, entry: {
   uiSessionId: string;
   targetResponseId: string;
   headers: Record<string, string>;
+  stopToken: string;
 }): void {
   activeStreams.set(key, entry)
   metrics.gauge('streams.active', activeStreams.size)

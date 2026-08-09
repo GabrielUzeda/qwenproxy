@@ -47,6 +47,17 @@ export function releaseWarmChat(accountId: string, chatId: string) {
   inFlightWarmChats.delete(warmChatKey(accountId, chatId));
 }
 
+/** Per-account ready warm chat counts (used by the admin dashboard). */
+export function getWarmPoolStats(): Record<string, number> {
+  const out: Record<string, number> = {}
+  for (const [accountId, pool] of warmPool.entries()) {
+    const now = Date.now()
+    const ready = pool.filter(e => now - e.timestamp <= WARM_POOL_TTL_MS && !isWarmChatInFlight(accountId, e.chatId)).length
+    if (ready > 0) out[accountId] = ready
+  }
+  return out
+}
+
 function isWarmChatInFlight(accountId: string, chatId: string) {
   return inFlightWarmChats.has(warmChatKey(accountId, chatId));
 }
