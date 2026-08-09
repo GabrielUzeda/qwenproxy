@@ -256,10 +256,17 @@ export async function chatCompletions(c: Context) {
     );
 
     if (canEconomize && config.hybridSessions.verify) {
-      const usable = await verifyServerContextMatches(sessionKey!, session!, lastUserContent);
-      if (!usable) {
-        console.warn(`[Chat] Session ${sessionKey} diverged from server; falling back to full bootstrap.`);
-        canEconomize = false;
+      // Amortized verification: check the server history at most once per
+      // window per session instead of on every turn (the history endpoint is a
+      // network round-trip on the hot path).
+      const sinceLast = Date.now() - (session!.lastVerifiedAt || 0);
+      if (sinceLast >= config.hybridSessions.verifyEveryMs) {
+        const usable = await verifyServerContextMatches(sessionKey!, session!, lastUserContent);
+        session!.lastVerifiedAt = Date.now();
+        if (!usable) {
+          console.warn(`[Chat] Session ${sessionKey} diverged from server; falling back to full bootstrap.`);
+          canEconomize = false;
+        }
       }
     }
     const economicalPrompt = canEconomize
@@ -495,6 +502,14 @@ export async function chatCompletions(c: Context) {
       return c.json(completed.body, completed.status as any);
     }
 
+    // The streaming degenerate-answer guard holds output back until it is clearly
+// non-degenerate, which adds latency to short answers. It is enabled only for
+// degenerate-prone flows (text-file/directive prompts) unless explicitly
+// configured otherwise (STREAM_DEGENERATE_GUARD=always|off).
+    const degenerateProne = finalPrompt.includes('[SYSTEM DIRECTIVE]');
+    const guardMode = config.streamDegenerateGuard;
+    const streamGuardEnabled = guardMode === 'always' || (guardMode === 'prone' && degenerateProne);
+
     return handleStreamingResponse(c, {
       stream: acquired.stream,
       completionId,
@@ -505,11 +520,15 @@ export async function chatCompletions(c: Context) {
       finalPrompt,
       streamOptions: body.stream_options,
       onComplete: releaseUserSlotOnce,
-      onDegenerateRetry: async () => {
-        console.warn('[Chat] Streaming degenerate reply detected. Regenerating on a clean chat...');
-        const retried = await obtainStream(`${finalPrompt}\n${buildAnswerDirective()}`, true);
-        return { stream: retried.stream, uiSessionId: retried.uiSessionId };
-      },
+      ...(streamGuardEnabled
+        ? {
+            onDegenerateRetry: async () => {
+              console.warn('[Chat] Streaming degenerate reply detected. Regenerating on a clean chat...');
+              const retried = await obtainStream(`${finalPrompt}\n${buildAnswerDirective()}`, true);
+              return { stream: retried.stream, uiSessionId: retried.uiSessionId };
+            },
+          }
+        : {}),
     });
   } catch (err: any) {
     releaseUserSlotOnce();

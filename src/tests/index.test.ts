@@ -268,6 +268,7 @@ test('Chat Completions endpoint - Non-streaming (stream: false)', async () => {
         start(c) {
           c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"phase": "thinking_summary", "extra": {"summary_thought": {"content": ["Thinking non-stream..."]}}}}]}\n\n'));
           c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"phase": "answer", "content": "Hello non-stream"}}]}\n\n'));
+          c.enqueue(new TextEncoder().encode('data: {"usage": {"input_tokens": 57, "output_tokens": 4}, "choices": []}\n\n'));
           c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
           c.close();
         }

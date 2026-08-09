@@ -9,7 +9,7 @@
  */
 
 import { config } from './config.js';
-import { getUserByApiKey, upsertUser, listUsers } from './database.js';
+import { getUserByApiKey, upsertUser, listUsers, type UserRow } from './database.js';
 
 export interface UserIdentity {
   id: string;
@@ -21,6 +21,14 @@ export interface UserIdentity {
 
 const rateWindows = new Map<string, number[]>();
 const activeStreams = new Map<string, number>();
+
+// Small TTL cache so authentication does not hit SQLite on every request.
+const API_KEY_CACHE_TTL_MS = 30_000;
+const apiKeyCache = new Map<string, { user: UserRow; at: number }>();
+
+export function invalidateUserCache(): void {
+  apiKeyCache.clear();
+}
 
 function defaultIdentity(id: string, email: string | null, isGlobal: boolean): UserIdentity {
   return {
@@ -66,14 +74,28 @@ export function resolveUserFromAuthHeader(authHeader?: string | null): UserIdent
     return defaultIdentity('global', null, true);
   }
 
-  // 2/3. Per-user keys (DB + env seeds).
+  // 2/3. Per-user keys (DB + env seeds), cached briefly.
   if (!seeded) {
     seeded = true;
     try { seedEnvApiKeys(); } catch { /* ignore */ }
   }
   try {
+    const cached = apiKeyCache.get(token);
+    if (cached) {
+      if (Date.now() - cached.at <= API_KEY_CACHE_TTL_MS) {
+        return {
+          id: cached.user.id,
+          email: cached.user.email,
+          rateLimitRpm: cached.user.rate_limit_rpm > 0 ? cached.user.rate_limit_rpm : config.users.defaultRateLimitRpm,
+          maxConcurrency: cached.user.max_concurrency > 0 ? cached.user.max_concurrency : config.users.defaultMaxConcurrency,
+          isGlobal: false,
+        };
+      }
+      apiKeyCache.delete(token);
+    }
     const user = getUserByApiKey(token);
     if (user) {
+      apiKeyCache.set(token, { user, at: Date.now() });
       return {
         id: user.id,
         email: user.email,

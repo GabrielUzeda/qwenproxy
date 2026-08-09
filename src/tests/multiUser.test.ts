@@ -101,10 +101,12 @@ test('session reconciliation: matching server history keeps economical mode', as
   resetAllSessions();
   const capturedPayloads: any[] = [];
   let first = true;
+  let historyCalls = 0;
 
   const restore = setupFetchMock((url, init) => {
     if (url.includes('/api/v2/chats/') && !first) {
       // Turn 2: server history matches the client's conversation.
+      historyCalls++;
       return historyResponse('User: Turn 2', 'conv-ok');
     }
     if (url.includes('/api/v2/chat/completions')) {
@@ -147,6 +149,31 @@ test('session reconciliation: matching server history keeps economical mode', as
     assert.strictEqual(capturedPayloads.length, 2);
     assert.ok(!capturedPayloads[1].messages[0].content.includes('Turn 1'), 'economical mode must be preserved when history matches');
     assert.ok(capturedPayloads[1].messages[0].content.includes('User: Turn 2'));
+
+    // Turn 3 within the verify window: verification must be amortized (no new
+    // history fetch), but economical mode keeps working.
+    const r3 = await app.fetch(new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        user: 'conv-recon',
+        messages: [
+          { role: 'user', content: 'Turn 1' },
+          { role: 'assistant', content: 'Aa' },
+          { role: 'user', content: 'Turn 2' },
+          { role: 'assistant', content: 'Bb' },
+          { role: 'user', content: 'Turn 3' }
+        ]
+      })
+    }));
+    assert.strictEqual(r3.status, 200);
+    await r3.text();
+
+    assert.strictEqual(capturedPayloads.length, 3);
+    assert.strictEqual(historyCalls, 1, 'verification must be amortized (1 fetch per window)');
+    assert.ok(!capturedPayloads[2].messages[0].content.includes('Turn 1'));
+    assert.ok(capturedPayloads[2].messages[0].content.includes('User: Turn 3'));
   } finally {
     restore();
     delete process.env.TEST_SESSION_ID;

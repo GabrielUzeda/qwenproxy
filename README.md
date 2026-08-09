@@ -267,7 +267,9 @@ Configuração (`.env`):
 ```
 HYBRID_SESSIONS_ENABLED=true
 HYBRID_SESSION_VERIFY=true   # verifica histórico no servidor antes de reusar; divergência → re-bootstrap
+HYBRID_SESSION_VERIFY_EVERY_MS=60000  # verificação amortizada (1x a cada janela por sessão)
 HYBRID_SESSION_TTL_MS=86400000
+STREAM_DEGENERATE_GUARD=prone  # prone (só arquivos/diretivas) | always | off
 ```
 
 ## Dashboard de administração

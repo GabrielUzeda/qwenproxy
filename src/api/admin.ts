@@ -21,9 +21,10 @@ import {
   getInUseAccounts,
 } from '../core/account-manager.js'
 import { listUsers, upsertUser, deleteUserById, getUserById } from '../core/database.js'
-import { getUserActiveStreams } from '../core/user-manager.js'
+import { getUserActiveStreams, invalidateUserCache } from '../core/user-manager.js'
 import { getSessionCount } from '../services/session-manager.js'
 import { getAllSeries } from '../core/time-series.js'
+import { getMemoryPressure } from '../core/memory-gate.js'
 import { readEnvFile, persistEnvPatch, restartServer, SETTINGS_ALLOWLIST, SETTINGS_SECRETS, BOOLEAN_KEYS, INTEGER_KEYS } from '../core/env-settings.js'
 import { renderDashboard } from './admin-dashboard.js'
 
@@ -157,6 +158,7 @@ async function buildOverview(): Promise<any> {
       pct: memoryPct,
     },
     cpu: { cores: os.cpus().length, load1m: os.loadavg()[0] },
+    memoryPressure: getMemoryPressure(),
     series: getAllSeries(),
     cache: (await (cache as any).getStats?.()) || undefined,
     accounts,
@@ -278,6 +280,7 @@ adminApp.post('/api/users', adminGuard, async (c) => {
       rateLimitRpm: Number(body?.rateLimitRpm) || config.users.defaultRateLimitRpm,
       maxConcurrency: Number(body?.maxConcurrency) || config.users.defaultMaxConcurrency,
     })
+    invalidateUserCache()
     return c.json({ ok: true, id })
   } catch (err: any) {
     return c.json({ error: err.message }, 400)
@@ -297,6 +300,7 @@ adminApp.put('/api/users/:id', adminGuard, async (c) => {
       rateLimitRpm: Number(body?.rateLimitRpm) || config.users.defaultRateLimitRpm,
       maxConcurrency: Number(body?.maxConcurrency) || config.users.defaultMaxConcurrency,
     })
+    invalidateUserCache()
     return c.json({ ok: true })
   } catch (err: any) {
     return c.json({ error: err.message }, 400)
@@ -305,6 +309,7 @@ adminApp.put('/api/users/:id', adminGuard, async (c) => {
 
 adminApp.delete('/api/users/:id', adminGuard, (c) => {
   deleteUserById(c.req.param('id'))
+  invalidateUserCache()
   return c.json({ ok: true })
 })
 

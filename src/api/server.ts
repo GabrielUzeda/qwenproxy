@@ -191,6 +191,8 @@ export async function startServer(): Promise<void> {
     stopSessionKeeper()
     watchdog.stop()
     stopTimeSeriesSampling()
+    const { flushSessions } = await import('../services/session-manager.js')
+    flushSessions()
     metrics.stopCollection()
     await cache.close()
     const { closePlaywright } = await import('../services/playwright.js')
