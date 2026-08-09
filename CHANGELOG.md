@@ -1,3 +1,10 @@
+# [1.13.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.16...v1.13.0) (2026-08-09)
+
+
+### Features
+
+* add admin dashboard with hybrid sessions, multi-user auth and load-aware routing ([71297af](https://github.com/pedrofariasx/qwenproxy/commit/71297af104b6e8232ddb73333503d7a515d040bd))
+
 ## [1.12.16](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.15...v1.12.16) (2026-07-21)
 
 
