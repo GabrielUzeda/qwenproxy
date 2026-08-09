@@ -1,3 +1,10 @@
+## [1.13.1](https://github.com/pedrofariasx/qwenproxy/compare/v1.13.0...v1.13.1) (2026-08-09)
+
+
+### Performance Improvements
+
+* batch session persistence, cache user keys and gate concurrency by memory ([8727a64](https://github.com/pedrofariasx/qwenproxy/commit/8727a64449ed6434caffeafedea201d7911d34bd))
+
 # [1.13.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.16...v1.13.0) (2026-08-09)
 
 
