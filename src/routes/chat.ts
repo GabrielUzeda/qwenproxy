@@ -41,36 +41,140 @@ async function verifyServerContextMatches(sessionKey: string, session: SessionEn
       session.chatId,
       session.headers,
       session.accountId === 'global' ? undefined : session.accountId,
-      8,
+      12,
     );
     if (!history.hasHistory) return false;
     const msgs = history.messages;
+
+    // Structural check: economical mode relies on server-side history, so the
+    // server must have at least one complete user→assistant exchange before the
+    // current user turn. A bare "Nova Conversa" with only the first user message
+    // means historyComplete was set prematurely (stream started but never finished).
+    const assistantCount = msgs.filter(m => m.role === 'assistant').length;
+    const userCount = msgs.filter(m => m.role === 'user').length;
+    if (assistantCount === 0 || userCount < 2) {
+      console.warn(`[Chat] Session ${sessionKey}: server history incomplete (${userCount} user, ${assistantCount} assistant). Re-bootstrapping.`);
+      return false;
+    }
+
+    // Find the last user message on the server.
     let lastUserMsg;
+    let lastUserIdx = -1;
     for (let i = msgs.length - 1; i >= 0; i--) {
       if (msgs[i].role === 'user') {
         lastUserMsg = msgs[i];
+        lastUserIdx = i;
         break;
       }
     }
     if (!lastUserMsg) return false;
+
+    // Verify the last user message content matches what the client is sending.
     const marker = `User: ${(lastUserContent || '').trim()}`;
     const content = lastUserMsg.content || '';
-    // The server's most recent user turn must contain the same last message the
-    // client is sending now.
     if (!content.trimEnd().endsWith(marker) && !content.includes(marker)) {
       console.warn(`[Chat] Session ${sessionKey}: server last user turn does not match client (expected marker "${marker.slice(0, 60)}...")`);
       return false;
     }
+
     // The user message must be threaded onto the assistant reply we recorded.
     if (session.parentId && lastUserMsg.parentId !== session.parentId) {
       console.warn(`[Chat] Session ${sessionKey}: parent mismatch (server=${lastUserMsg.parentId}, tracked=${session.parentId}). Re-syncing.`);
       return false;
     }
+
+    // Verify there is an assistant message immediately before the last user
+    // message, confirming the conversation is properly threaded (not orphaned).
+    let hasAssistantBeforeLastUser = false;
+    for (let i = lastUserIdx - 1; i >= 0; i--) {
+      if (msgs[i].role === 'assistant') {
+        hasAssistantBeforeLastUser = true;
+        break;
+      }
+      // Skip over contiguous user messages (multi-turn user input).
+      if (msgs[i].role !== 'user') break;
+    }
+    if (lastUserIdx > 0 && !hasAssistantBeforeLastUser) {
+      console.warn(`[Chat] Session ${sessionKey}: no assistant reply before last user message. History may be corrupted.`);
+      return false;
+    }
+
     return true;
   } catch (err: any) {
     console.warn(`[Chat] Session verification failed for ${sessionKey}:`, err.message);
     return false;
   }
+}
+
+/**
+ * Builds a compact summary of the most recent assistant tool calls and tool
+ * responses to embed in the economical prompt. Without this, economical mode
+ * sends only `system + last user message` and the model loses stateful context
+ * like to-do lists, file edits, or other actions it performed on prior turns.
+ *
+ * Includes:
+ * - The last assistant message text (often contains the current to-do state)
+ * - Recent tool call names + arguments (compact)
+ * - Recent tool response summaries (compact)
+ */
+function buildRecentToolContext(
+  messages: Array<{ role: string; content: string | null; tool_calls?: any[]; tool_call_id?: string; name?: string }>,
+): string {
+  if (!messages || messages.length === 0) return '';
+
+  const idToName = new Map<string, string>();
+  for (const msg of messages) {
+    if (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
+      for (const tc of msg.tool_calls) {
+        if (tc.id && tc.function?.name) idToName.set(tc.id, tc.function.name);
+      }
+    }
+  }
+
+  // Walk backwards collecting the most recent tool-related turns.
+  // Stop at the first plain user message we encounter (the current request).
+  const toolTurns: string[] = [];
+  const MAX_TOOL_TURNS = 6;
+  const MAX_ARG_CHARS = 400;
+  const MAX_RESPONSE_CHARS = 600;
+
+  for (let i = messages.length - 1; i >= 0 && toolTurns.length < MAX_TOOL_TURNS * 2; i--) {
+    const msg = messages[i];
+
+    if (msg.role === 'user') break;
+
+    if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+      for (let j = msg.tool_calls.length - 1; j >= 0; j--) {
+        const tc = msg.tool_calls[j];
+        const name = tc.function?.name || 'unknown';
+        let argsStr = tc.function?.arguments || '';
+        if (typeof argsStr !== 'string') {
+          try { argsStr = JSON.stringify(argsStr); } catch { argsStr = ''; }
+        }
+        if (argsStr.length > MAX_ARG_CHARS) argsStr = argsStr.slice(0, MAX_ARG_CHARS) + '...[truncated]';
+        toolTurns.unshift(`  [call] ${name}(${argsStr})`);
+      }
+      // Include the assistant text that preceded these tool calls (often contains
+      // the current to-do state or plan).
+      const assistantText = (typeof msg.content === 'string' ? msg.content : '').trim();
+      if (assistantText) {
+        const truncated = assistantText.length > MAX_RESPONSE_CHARS
+          ? assistantText.slice(assistantText.length - MAX_RESPONSE_CHARS) + '...[truncated]'
+          : assistantText;
+        toolTurns.unshift(`  [assistant] ${truncated}`);
+      }
+    } else if (msg.role === 'tool' || msg.role === 'function') {
+      const name = msg.name || idToName.get(msg.tool_call_id || '') || 'tool';
+      const contentStr = (typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)) || '';
+      const truncated = contentStr.length > MAX_RESPONSE_CHARS
+        ? contentStr.slice(0, MAX_RESPONSE_CHARS) + '...[truncated]'
+        : contentStr;
+      toolTurns.unshift(`  [tool_response ${name}] ${truncated}`);
+    }
+  }
+
+  if (toolTurns.length === 0) return '';
+  return `# RECENT TOOL ACTIVITY (you performed these actions earlier in this session — preserve state awareness):\n${toolTurns.join('\n')}\n`;
 }
 
 export async function chatCompletions(c: Context) {
@@ -187,7 +291,23 @@ export async function chatCompletions(c: Context) {
 
     const bodyAny = body as any;
     const hasTools = Array.isArray(bodyAny.tools) && bodyAny.tools.length > 0;
+    // A conversation is a tool loop whenever `tools` is declared OR the history
+    // contains tool responses / assistant tool_calls — even if the client stops
+    // sending the `tools` parameter on later turns. Economical mode must never
+    // kick in here, otherwise the tool responses vanish from context and the
+    // model degenerates into repeating "Tool Response".
+    const hasToolConversation =
+      hasTools ||
+      messages.some(
+        (m) =>
+          m.role === 'tool' ||
+          m.role === 'function' ||
+          (m.role === 'assistant' && Array.isArray((m as any).tool_calls) && (m as any).tool_calls.length > 0)
+      );
     const toolChoiceMode = getToolChoiceMode(bodyAny.tool_choice);
+    // Surface/parse tool calls whenever the conversation is a tool loop, even on
+    // turns where the client stopped sending the `tools` parameter.
+    const parseToolCalls = hasToolConversation && toolChoiceMode !== 'none';
     if (hasTools && toolChoiceMode !== 'none') {
       const formattedTools = bodyAny.tools.map((t: any) => {
         if (t.type === 'function') {
@@ -251,27 +371,26 @@ export async function chatCompletions(c: Context) {
       session.accountId !== 'guest' &&
       lastMsg?.role === 'user' &&
       lastUserContent &&
-      !hasTools &&
+      !hasToolConversation &&
       pendingMultimodal.length === 0
     );
 
     if (canEconomize && config.hybridSessions.verify) {
-      // Amortized verification: check the server history at most once per
-      // window per session instead of on every turn (the history endpoint is a
-      // network round-trip on the hot path).
-      const sinceLast = Date.now() - (session!.lastVerifiedAt || 0);
-      if (sinceLast >= config.hybridSessions.verifyEveryMs) {
-        const usable = await verifyServerContextMatches(sessionKey!, session!, lastUserContent);
-        session!.lastVerifiedAt = Date.now();
-        if (!usable) {
-          console.warn(`[Chat] Session ${sessionKey} diverged from server; falling back to full bootstrap.`);
-          canEconomize = false;
-        }
+      const usable = await verifyServerContextMatches(sessionKey!, session!, lastUserContent);
+      if (!usable) {
+        console.warn(`[Chat] Session ${sessionKey} diverged from server; falling back to full bootstrap.`);
+        canEconomize = false;
       }
     }
-    const economicalPrompt = canEconomize
-      ? (systemPrompt ? `${systemPrompt}\nUser: ${lastUserContent}` : `User: ${lastUserContent}`)
-      : undefined;
+    let economicalPrompt: string | undefined;
+    if (canEconomize) {
+      const recentToolContext = buildRecentToolContext(messages);
+      const parts: string[] = [];
+      if (systemPrompt) parts.push(systemPrompt);
+      if (recentToolContext) parts.push(recentToolContext);
+      parts.push(`User: ${lastUserContent}`);
+      economicalPrompt = parts.join('\n');
+    }
     const baseStreamOptions = { sessionKey, economicalPrompt };
 
     const isGuestModeOnly = process.env.QWEN_GUEST_MODE_ONLY?.toLowerCase() === 'true';
@@ -334,10 +453,12 @@ export async function chatCompletions(c: Context) {
           }
           // Drain-based wait: pop as soon as any account slot frees, with a
           // short poll interval as a safety net instead of a blind 300ms sleep.
+          const freed = onAccountFreed();
           await Promise.race([
             new Promise(r => setTimeout(r, 300)),
-            onAccountFreed(),
+            freed.promise,
           ]);
+          freed.cancel();
           account = getNextAccount();
         }
         console.log(`[Chat] Waited ${Date.now() - waitStart}ms for a free lane`);
@@ -478,7 +599,7 @@ export async function chatCompletions(c: Context) {
 
     if (!isStream) {
       const collectResponse = async (acquiredStream: ReadableStream, acquiredSession: string) =>
-        collectNonStreamingResult(c, acquiredStream, completionId, body.model, acquiredSession, hasTools && toolChoiceMode !== 'none', bodyAny.tools || []);
+        collectNonStreamingResult(c, acquiredStream, completionId, body.model, acquiredSession, parseToolCalls, bodyAny.tools || []);
 
       let completed = await collectResponse(acquired.stream, acquired.uiSessionId);
 
@@ -502,33 +623,21 @@ export async function chatCompletions(c: Context) {
       return c.json(completed.body, completed.status as any);
     }
 
-    // The streaming degenerate-answer guard holds output back until it is clearly
-// non-degenerate, which adds latency to short answers. It is enabled only for
-// degenerate-prone flows (text-file/directive prompts) unless explicitly
-// configured otherwise (STREAM_DEGENERATE_GUARD=always|off).
-    const degenerateProne = finalPrompt.includes('[SYSTEM DIRECTIVE]');
-    const guardMode = config.streamDegenerateGuard;
-    const streamGuardEnabled = guardMode === 'always' || (guardMode === 'prone' && degenerateProne);
-
     return handleStreamingResponse(c, {
       stream: acquired.stream,
       completionId,
       model: body.model,
       uiSessionId: acquired.uiSessionId,
-      hasTools: hasTools && toolChoiceMode !== 'none',
+      hasTools: parseToolCalls,
       tools: bodyAny.tools || [],
       finalPrompt,
       streamOptions: body.stream_options,
       onComplete: releaseUserSlotOnce,
-      ...(streamGuardEnabled
-        ? {
-            onDegenerateRetry: async () => {
-              console.warn('[Chat] Streaming degenerate reply detected. Regenerating on a clean chat...');
-              const retried = await obtainStream(`${finalPrompt}\n${buildAnswerDirective()}`, true);
-              return { stream: retried.stream, uiSessionId: retried.uiSessionId };
-            },
-          }
-        : {}),
+      onDegenerateRetry: async () => {
+        console.warn('[Chat] Streaming degenerate reply detected. Regenerating on a clean chat...');
+        const retried = await obtainStream(`${finalPrompt}\n${buildAnswerDirective()}`, true);
+        return { stream: retried.stream, uiSessionId: retried.uiSessionId };
+      },
     });
   } catch (err: any) {
     releaseUserSlotOnce();
@@ -555,7 +664,9 @@ export async function chatCompletionsStop(c: Context) {
       return c.json({ error: 'Stream not found' }, 404);
     }
 
-    if (!crypto.timingSafeEqual(Buffer.from(stop_token), Buffer.from(stream.stopToken))) {
+    const tokenBuf = Buffer.from(String(stop_token));
+    const expectedBuf = Buffer.from(stream.stopToken);
+    if (tokenBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(tokenBuf, expectedBuf)) {
       return c.json({ error: 'Invalid stop_token' }, 403);
     }
 

@@ -151,7 +151,27 @@ export class Metrics extends EventEmitter {
         const labelsStr = point.labels
           ? `{${Object.entries(point.labels).map(([k, v]) => `${k}="${v}"`).join(',')}}`
           : ''
-        output += `${metric.name}${labelsStr} ${point.value} ${point.timestamp}\n`
+
+        if (metric.type === 'histogram' && typeof point.value === 'object' && point.value !== null) {
+          const data = point.value as { count: number; sum: number; buckets: Map<number, number> }
+          const buckets = metric.histogramBuckets || []
+          let cumulative = 0
+          for (const bucket of buckets) {
+            cumulative += data.buckets.get(bucket) || 0
+            const bucketLabels = point.labels
+              ? `{${Object.entries(point.labels).map(([k, v]) => `${k}="${v}"`).join(',')},le="${bucket}"}`
+              : `{le="${bucket}"}`
+            output += `${metric.name}_bucket${bucketLabels} ${cumulative}\n`
+          }
+          const infLabels = point.labels
+            ? `{${Object.entries(point.labels).map(([k, v]) => `${k}="${v}"`).join(',')},le="+Inf"}`
+            : '{le="+Inf"}'
+          output += `${metric.name}_bucket${infLabels} ${data.count}\n`
+          output += `${metric.name}_sum${labelsStr} ${data.sum}\n`
+          output += `${metric.name}_count${labelsStr} ${data.count}\n`
+        } else {
+          output += `${metric.name}${labelsStr} ${point.value} ${point.timestamp}\n`
+        }
       }
     }
     return output

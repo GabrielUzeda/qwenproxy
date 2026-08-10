@@ -261,7 +261,18 @@ export async function getOrLaunchBrowser(browserType: BrowserType = 'chromium'):
     ignoreDefaultArgs: ['--enable-automation', '--enable-blink-features'],
     args: launchArgs,
   });
-  browser.on('disconnected', () => { browser = null; });
+  browser.on('disconnected', () => {
+    browser = null;
+    accountContexts.clear();
+    accountPages.clear();
+    accountHeaderCaches.clear();
+    cookieCaches.clear();
+    cachedUserAgents.clear();
+    context = null;
+    activePage = null;
+    guestContext = null;
+    guestPage = null;
+  });
   return browser;
 }
 
@@ -651,9 +662,12 @@ export async function closePlaywrightForAccount(accountId: string) {
       await saveStorageState(acctContext, accountId);
     }
     await acctContext.close();
-    accountContexts.delete(accountId);
-    accountPages.delete(accountId);
   }
+  accountContexts.delete(accountId);
+  accountPages.delete(accountId);
+  accountHeaderCaches.delete(accountId);
+  cookieCaches.delete(accountId);
+  cachedUserAgents.delete(accountId);
 }
 
 export function getPageForAccount(accountId?: string): Page | null {

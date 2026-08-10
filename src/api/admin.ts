@@ -21,10 +21,9 @@ import {
   getInUseAccounts,
 } from '../core/account-manager.js'
 import { listUsers, upsertUser, deleteUserById, getUserById } from '../core/database.js'
-import { getUserActiveStreams, invalidateUserCache } from '../core/user-manager.js'
+import { getUserActiveStreams } from '../core/user-manager.js'
 import { getSessionCount } from '../services/session-manager.js'
 import { getAllSeries } from '../core/time-series.js'
-import { getMemoryPressure } from '../core/memory-gate.js'
 import { readEnvFile, persistEnvPatch, restartServer, SETTINGS_ALLOWLIST, SETTINGS_SECRETS, BOOLEAN_KEYS, INTEGER_KEYS } from '../core/env-settings.js'
 import { renderDashboard } from './admin-dashboard.js'
 
@@ -32,6 +31,45 @@ export const adminApp = new Hono()
 
 const COOKIE_NAME = 'qadmin'
 const COOKIE_MAX_AGE = 7 * 24 * 60 * 60 // 7 days
+
+const LOGIN_WINDOW_MS = 5 * 60 * 1000
+const LOGIN_MAX_FAILURES = 5
+const loginFailures = new Map<string, number[]>()
+
+function clientIp(c: any): string {
+  return (
+    c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ||
+    c.env?.incoming?.socket?.remoteAddress ||
+    'unknown'
+  )
+}
+
+function isLoginBlocked(ip: string): boolean {
+  const now = Date.now()
+  const recent = (loginFailures.get(ip) || []).filter(t => now - t < LOGIN_WINDOW_MS)
+  loginFailures.set(ip, recent)
+  return recent.length >= LOGIN_MAX_FAILURES
+}
+
+function recordLoginFailure(ip: string): void {
+  const now = Date.now()
+  const recent = (loginFailures.get(ip) || []).filter(t => now - t < LOGIN_WINDOW_MS)
+  recent.push(now)
+  loginFailures.set(ip, recent)
+}
+
+function clearLoginFailures(ip: string): void {
+  loginFailures.delete(ip)
+}
+
+function readPackageVersion(): string {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.resolve('package.json'), 'utf-8'))
+    return typeof pkg.version === 'string' ? pkg.version : 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
 
 function adminPassword(): string {
   // ADMIN_PASSWORD first; fall back to the proxy API key so operators with a
@@ -74,6 +112,10 @@ async function adminGuard(c: any, next: any) {
 // --- Auth -------------------------------------------------------------------
 
 adminApp.post('/api/login', async (c) => {
+  const ip = clientIp(c)
+  if (isLoginBlocked(ip)) {
+    return c.json({ error: 'Muitas tentativas. Aguarde alguns minutos.' }, 429)
+  }
   const body = await c.req.json().catch(() => null)
   const password = String(body?.password || '')
   const expected = adminPassword()
@@ -83,12 +125,15 @@ adminApp.post('/api/login', async (c) => {
   const a = Buffer.from(password)
   const b = Buffer.from(expected)
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    recordLoginFailure(ip)
     return c.json({ error: 'Senha incorreta' }, 401)
   }
+  clearLoginFailures(ip)
   const expiresAt = Date.now() + COOKIE_MAX_AGE * 1000
   setCookie(c, COOKIE_NAME, signSession(expiresAt), {
     httpOnly: true,
     sameSite: 'Lax',
+    secure: c.req.header('x-forwarded-proto') === 'https',
     path: '/',
     maxAge: COOKIE_MAX_AGE,
   })
@@ -107,7 +152,7 @@ adminApp.get('/api/session', (c) => {
     authenticated: verifySession(c),
     enabled: true,
     uptime: Math.floor(process.uptime()),
-    version: '1.12.16',
+    version: readPackageVersion(),
   })
 })
 
@@ -158,7 +203,6 @@ async function buildOverview(): Promise<any> {
       pct: memoryPct,
     },
     cpu: { cores: os.cpus().length, load1m: os.loadavg()[0] },
-    memoryPressure: getMemoryPressure(),
     series: getAllSeries(),
     cache: (await (cache as any).getStats?.()) || undefined,
     accounts,
@@ -280,7 +324,6 @@ adminApp.post('/api/users', adminGuard, async (c) => {
       rateLimitRpm: Number(body?.rateLimitRpm) || config.users.defaultRateLimitRpm,
       maxConcurrency: Number(body?.maxConcurrency) || config.users.defaultMaxConcurrency,
     })
-    invalidateUserCache()
     return c.json({ ok: true, id })
   } catch (err: any) {
     return c.json({ error: err.message }, 400)
@@ -300,7 +343,6 @@ adminApp.put('/api/users/:id', adminGuard, async (c) => {
       rateLimitRpm: Number(body?.rateLimitRpm) || config.users.defaultRateLimitRpm,
       maxConcurrency: Number(body?.maxConcurrency) || config.users.defaultMaxConcurrency,
     })
-    invalidateUserCache()
     return c.json({ ok: true })
   } catch (err: any) {
     return c.json({ error: err.message }, 400)
@@ -309,7 +351,6 @@ adminApp.put('/api/users/:id', adminGuard, async (c) => {
 
 adminApp.delete('/api/users/:id', adminGuard, (c) => {
   deleteUserById(c.req.param('id'))
-  invalidateUserCache()
   return c.json({ ok: true })
 })
 

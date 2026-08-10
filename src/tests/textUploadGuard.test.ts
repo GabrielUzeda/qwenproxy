@@ -3,9 +3,6 @@ import assert from 'node:assert';
 
 process.env.TEST_MOCK_PLAYWRIGHT = 'true';
 process.env.HYBRID_SESSION_VERIFY = 'false';
-// The streaming guard is selective by default (prone flows only); this test
-// forces it on so the degenerate regeneration is exercised on a plain prompt.
-process.env.STREAM_DEGENERATE_GUARD = 'always';
 
 delete process.env.API_KEY;
 

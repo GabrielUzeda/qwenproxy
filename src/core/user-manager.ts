@@ -8,8 +8,9 @@
  *     the table on first use.
  */
 
+import crypto from 'crypto';
 import { config } from './config.js';
-import { getUserByApiKey, upsertUser, listUsers, type UserRow } from './database.js';
+import { getUserByApiKey, upsertUser, listUsers } from './database.js';
 
 export interface UserIdentity {
   id: string;
@@ -21,14 +22,6 @@ export interface UserIdentity {
 
 const rateWindows = new Map<string, number[]>();
 const activeStreams = new Map<string, number>();
-
-// Small TTL cache so authentication does not hit SQLite on every request.
-const API_KEY_CACHE_TTL_MS = 30_000;
-const apiKeyCache = new Map<string, { user: UserRow; at: number }>();
-
-export function invalidateUserCache(): void {
-  apiKeyCache.clear();
-}
 
 function defaultIdentity(id: string, email: string | null, isGlobal: boolean): UserIdentity {
   return {
@@ -68,34 +61,24 @@ export function resolveUserFromAuthHeader(authHeader?: string | null): UserIdent
   const token = authHeader.replace(/^Bearer\s+/i, '').trim();
   if (!token) return null;
 
-  // 1. Proxy-wide API key → global user.
+  // 1. Proxy-wide API key → global user (constant-time comparison).
   const globalKey = (process.env.API_KEY || config.apiKey || '').trim();
-  if (globalKey && token === globalKey) {
-    return defaultIdentity('global', null, true);
+  if (globalKey) {
+    const a = Buffer.from(token);
+    const b = Buffer.from(globalKey);
+    if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
+      return defaultIdentity('global', null, true);
+    }
   }
 
-  // 2/3. Per-user keys (DB + env seeds), cached briefly.
+  // 2/3. Per-user keys (DB + env seeds).
   if (!seeded) {
     seeded = true;
     try { seedEnvApiKeys(); } catch { /* ignore */ }
   }
   try {
-    const cached = apiKeyCache.get(token);
-    if (cached) {
-      if (Date.now() - cached.at <= API_KEY_CACHE_TTL_MS) {
-        return {
-          id: cached.user.id,
-          email: cached.user.email,
-          rateLimitRpm: cached.user.rate_limit_rpm > 0 ? cached.user.rate_limit_rpm : config.users.defaultRateLimitRpm,
-          maxConcurrency: cached.user.max_concurrency > 0 ? cached.user.max_concurrency : config.users.defaultMaxConcurrency,
-          isGlobal: false,
-        };
-      }
-      apiKeyCache.delete(token);
-    }
     const user = getUserByApiKey(token);
     if (user) {
-      apiKeyCache.set(token, { user, at: Date.now() });
       return {
         id: user.id,
         email: user.email,
@@ -143,9 +126,10 @@ export function getUserActiveStreams(userId: string): number {
   return activeStreams.get(userId) || 0;
 }
 
-export function getRateLimitInfo(userId: string): { used: number; limit: number; windowMs: number } {
+export function getRateLimitInfo(userId: string, userLimit?: number): { used: number; limit: number; windowMs: number } {
   const now = Date.now();
   const cutoff = now - 60_000;
   const timestamps = (rateWindows.get(userId) || []).filter(t => t > cutoff);
-  return { used: timestamps.length, limit: config.users.defaultRateLimitRpm, windowMs: 60_000 };
+  const limit = userLimit && userLimit > 0 ? userLimit : config.users.defaultRateLimitRpm;
+  return { used: timestamps.length, limit, windowMs: 60_000 };
 }

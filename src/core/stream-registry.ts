@@ -1,27 +1,30 @@
 import { metrics } from './metrics.js'
 
-const activeStreams = new Map<string, {
+export interface StreamRegistryEntry {
   abortController: AbortController;
   accountId: string;
   uiSessionId: string;
   targetResponseId: string;
   headers: Record<string, string>;
   stopToken: string;
-}>();
+  createdAt: number;
+}
 
-export function registerStream(key: string, entry: {
-  abortController: AbortController;
-  accountId: string;
-  uiSessionId: string;
-  targetResponseId: string;
-  headers: Record<string, string>;
-  stopToken: string;
-}): void {
-  activeStreams.set(key, entry)
+const activeStreams = new Map<string, StreamRegistryEntry>();
+
+export function registerStream(
+  key: string,
+  entry: Omit<StreamRegistryEntry, 'createdAt'> & { createdAt?: number },
+): void {
+  activeStreams.set(key, { ...entry, createdAt: entry.createdAt ?? Date.now() })
   metrics.gauge('streams.active', activeStreams.size)
 }
 
-export function getStream(key: string): ReturnType<typeof activeStreams.get> {
+export function getStreamRegistry(): Map<string, StreamRegistryEntry> {
+  return activeStreams
+}
+
+export function getStream(key: string): StreamRegistryEntry | undefined {
   return activeStreams.get(key)
 }
 

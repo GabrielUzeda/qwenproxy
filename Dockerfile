@@ -14,6 +14,11 @@ COPY docker-entrypoint.sh ./docker-entrypoint.sh
 
 RUN npm run build && npm prune --omit=dev
 
+COPY web/package.json web/package-lock.json web/
+RUN npm --prefix web ci
+COPY web/ web/
+RUN npm --prefix web run build && rm -rf web/node_modules
+
 RUN mkdir -p /app/data /app/qwen_profiles /tmp/playwright \
     && chown -R pwuser:pwuser /app /tmp/playwright \
     && chmod +x /app/docker-entrypoint.sh

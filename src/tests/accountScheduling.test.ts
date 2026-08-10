@@ -69,7 +69,8 @@ test('account scheduler: getNextAccount prefers the least-loaded viable account'
 
 test('account scheduler: onAccountFreed resolves when a slot frees', async () => {
   let resolved = false;
-  onAccountFreed().then(() => {
+  const freed = onAccountFreed();
+  freed.promise.then(() => {
     resolved = true;
   });
 
@@ -79,4 +80,7 @@ test('account scheduler: onAccountFreed resolves when a slot frees', async () =>
   markAccountStreamEnd('sched-free-slot');
   await new Promise(r => setTimeout(r, 30));
   assert.strictEqual(resolved, true, 'waiters must be drained on slot release');
+
+  const cancelled = onAccountFreed();
+  cancelled.cancel();
 });

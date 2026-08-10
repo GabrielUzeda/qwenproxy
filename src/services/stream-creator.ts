@@ -5,8 +5,7 @@ import { RetryableQwenStreamError, QwenUpstreamError, handleErrorBody, handleJso
 import { getWarmedChat, releaseWarmChat } from './warm-pool.js';
 import { getClientHintsHeaders, Mutex } from './browser-manager.js';
 import type { Page } from 'playwright';
-import { releaseAccountInUse, markAccountStreamStart, markAccountStreamEnd, getAccountActiveLoad } from '../core/account-manager.js';
-import { getMemoryPressure } from '../core/memory-gate.js';
+import { releaseAccountInUse, markAccountStreamStart, markAccountStreamEnd } from '../core/account-manager.js';
 import { BAXIA_IFRAME_SELECTOR, solveBaxiaCaptcha } from './captcha-solver.js';
 import { uploadLargePromptAsFile } from '../routes/upload.js';
 import { getSession, setSession, getSessionParent, updateSessionParent } from './session-manager.js';
@@ -237,14 +236,7 @@ function getAccountStreamMutex(accountId: string): Mutex {
 }
 
 function shouldSerializeAccountStreams(accountId: string): boolean {
-  // Lane accounts normally run streams in parallel. Under memory pressure the
-  // proxy adaptively re-serializes: critical == stop all parallelism; high ==
-  // only throttle accounts that are already actively streaming.
-  if (!accountId.includes('::lane-')) return true
-  const pressure = getMemoryPressure()
-  if (pressure === 'critical') return true
-  if (pressure === 'high') return getAccountActiveLoad(accountId) > 0
-  return false
+  return !accountId.includes('::lane-');
 }
 
 export async function disableNativeTools(accountId?: string): Promise<void> {

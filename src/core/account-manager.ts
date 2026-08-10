@@ -176,10 +176,18 @@ export function getAccountActiveLoad(accountId?: string): number {
 }
 
 /** Resolves the next time any account slot frees (replaces blind polling). */
-export function onAccountFreed(): Promise<void> {
-  return new Promise(resolve => {
-    freeListeners.push(resolve)
-  })
+export function onAccountFreed(): { promise: Promise<void>; cancel: () => void } {
+  let resolve: () => void
+  const promise = new Promise<void>(r => { resolve = r })
+  const entry = resolve!
+  freeListeners.push(entry)
+  return {
+    promise,
+    cancel: () => {
+      const idx = freeListeners.indexOf(entry)
+      if (idx !== -1) freeListeners.splice(idx, 1)
+    },
+  }
 }
 
 export function getAccountById(accountId: string): QwenAccount | null {

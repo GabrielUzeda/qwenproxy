@@ -1,5 +1,7 @@
 import { Hono } from 'hono'
-import { serve } from '@hono/node-server'
+import type { Context } from 'hono'
+import { bodyLimit } from 'hono/body-limit'
+import { serve, type ServerType } from '@hono/node-server'
 import { config } from '../core/config.js'
 import { metrics } from '../core/metrics.js'
 import { cache } from '../cache/memory-cache.js'
@@ -13,7 +15,7 @@ import { getBaseAccountId, makeAccountLaneId } from '../core/account-lanes.js'
 const app = new Hono()
 
 let watchdog: Watchdog
-let server: any
+let server: ServerType | undefined
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -62,7 +64,10 @@ app.use('/v1/*', async (c, next) => {
 })
 
 app.route('', modelsApp)
-app.post('/v1/chat/completions', chatCompletions)
+app.post('/v1/chat/completions', bodyLimit({
+  maxSize: 52 * 1024 * 1024,
+  onError: (c: Context) => c.json({ error: { message: 'Request body too large' } }, 413),
+}), chatCompletions)
 app.post('/v1/chat/completions/stop', chatCompletionsStop)
 app.post('/v1/upload', uploadFile)
 
@@ -191,15 +196,17 @@ export async function startServer(): Promise<void> {
     stopSessionKeeper()
     watchdog.stop()
     stopTimeSeriesSampling()
-    const { flushSessions } = await import('../services/session-manager.js')
-    flushSessions()
     metrics.stopCollection()
     await cache.close()
     const { closePlaywright } = await import('../services/playwright.js')
     await closePlaywright()
     const { closeDatabase } = await import('../core/database.js')
     closeDatabase()
-    server?.close()
+    await new Promise<void>(resolve => {
+      if (!server) return resolve()
+      server.close(() => resolve())
+      setTimeout(() => resolve(), 5000).unref()
+    })
     process.exit(0)
   }
 

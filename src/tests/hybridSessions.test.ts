@@ -204,6 +204,58 @@ test('hybrid-session: tools disable economical mode', async () => {
   }
 });
 
+test('hybrid-session: tool responses in history disable economical mode even without tools param', async () => {
+  resetAllSessions();
+  const capturedPayloads: any[] = [];
+
+  const restore = setupFetchMock((_url, init) => {
+    capturedPayloads.push(JSON.parse(init?.body as string || '{}'));
+    return sseResponse(capturedPayloads.length === 1 ? ['noparam-tool-1'] : ['noparam-tool-2']);
+  });
+
+  try {
+    process.env.TEST_SESSION_ID = 'hybrid-noparam-tool-chat';
+
+    // Turn 1: plain turn (establishes the session).
+    const r1 = await app.fetch(new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3.6-plus', user: 'conv-np-tool', messages: [{ role: 'user', content: 'T0' }] })
+    }));
+    assert.strictEqual(r1.status, 200);
+    await r1.text();
+
+    // Turn 2: NO `tools` parameter, but the history contains tool messages.
+    // Economical mode must be disabled so the tool responses stay in context.
+    const r2 = await app.fetch(new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        user: 'conv-np-tool',
+        messages: [
+          { role: 'user', content: 'T1' },
+          { role: 'assistant', content: '', tool_calls: [{ id: 'call_9', type: 'function', function: { name: 'read_file', arguments: '{"path":"x"}' } }] },
+          { role: 'tool', tool_call_id: 'call_9', name: 'read_file', content: 'file x' },
+          { role: 'user', content: 'T2' }
+        ]
+      })
+    }));
+    assert.strictEqual(r2.status, 200);
+    await r2.text();
+
+    assert.strictEqual(capturedPayloads.length, 2);
+    const second = capturedPayloads[1].messages[0].content;
+    assert.ok(second.includes('T1'), 'full conversation must be sent on a tool-loop turn');
+    assert.ok(second.includes('Tool Response (read_file): file x'), 'tool responses must stay in context');
+    assert.ok(second.includes('T2'));
+    assert.ok(!second.endsWith('User: T2'), 'must not be economical (only last message)');
+  } finally {
+    restore();
+    delete process.env.TEST_SESSION_ID;
+  }
+});
+
 test('hybrid-session: streaming responses expose session_id', async () => {
   const restore = setupFetchMock(() => sseResponse(['qwen-stream-1']));
 

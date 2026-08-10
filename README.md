@@ -128,10 +128,10 @@ BROWSER=chromium
 HEADLESS=true
 
 # Timeouts (milissegundos)
-NAVIGATION_TIMEOUT=45000
-PAGE_TIMEOUT=30000
-HTTP_TIMEOUT=30000
-HEADERS_TIMEOUT=60000
+NAVIGATION_TIMEOUT=90000
+PAGE_TIMEOUT=60000
+HTTP_TIMEOUT=45000
+HEADERS_TIMEOUT=90000
 CHAT_TIMEOUT=120000
 STREAM_IDLE_TIMEOUT=180000
 ```
@@ -267,9 +267,7 @@ Configuração (`.env`):
 ```
 HYBRID_SESSIONS_ENABLED=true
 HYBRID_SESSION_VERIFY=true   # verifica histórico no servidor antes de reusar; divergência → re-bootstrap
-HYBRID_SESSION_VERIFY_EVERY_MS=60000  # verificação amortizada (1x a cada janela por sessão)
 HYBRID_SESSION_TTL_MS=86400000
-STREAM_DEGENERATE_GUARD=prone  # prone (só arquivos/diretivas) | always | off
 ```
 
 ## Dashboard de administração

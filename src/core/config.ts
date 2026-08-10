@@ -62,12 +62,10 @@ const envSchema = z.object({
   HYBRID_SESSIONS_ENABLED: envBool(true),
   HYBRID_SESSION_VERIFY: envBool(true),
   HYBRID_SESSION_TTL_MS: envInt(86400000, 1),
-  HYBRID_SESSION_VERIFY_EVERY_MS: envInt(60000, 1),
   USER_RATE_LIMIT_RPM: envInt(120, 0),
   USER_MAX_CONCURRENCY: envInt(8, 1),
   USER_API_KEYS: z.string().default(''),
   ADMIN_PASSWORD: z.string().default(''),
-  STREAM_DEGENERATE_GUARD: z.string().default('prone'),
 })
 
 const env = envSchema.parse(process.env)
@@ -163,7 +161,6 @@ export const config = {
   hybridSessions: {
     enabled: env.HYBRID_SESSIONS_ENABLED,
     verify: env.HYBRID_SESSION_VERIFY,
-    verifyEveryMs: env.HYBRID_SESSION_VERIFY_EVERY_MS,
     ttlMs: env.HYBRID_SESSION_TTL_MS,
   },
   users: {
@@ -172,7 +169,6 @@ export const config = {
     apiKeys: env.USER_API_KEYS,
   },
   adminPassword: env.ADMIN_PASSWORD,
-  streamDegenerateGuard: env.STREAM_DEGENERATE_GUARD as 'prone' | 'always' | 'off',
 }
 
 export type Config = typeof config

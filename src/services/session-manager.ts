@@ -17,6 +17,7 @@
 import { config } from '../core/config.js';
 import {
   listSessions,
+  upsertSession,
   deleteSession,
 } from '../core/database.js';
 import { getDatabase } from '../core/database.js';
@@ -28,8 +29,6 @@ export interface SessionEntry {
   parentId: string | null;
   historyComplete: boolean;
   updatedAt: number;
-  /** Last time the server-side history was checked (in-memory, not persisted). */
-  lastVerifiedAt?: number;
 }
 
 const MAX_SESSIONS = 2000;
@@ -81,74 +80,20 @@ function loadSessionsFromDb(): void {
   }
 }
 
-// --- Debounced SQLite writes -------------------------------------------------
-// Session updates happen on the hot path (every response.created / economical
-// turn). Instead of committing to SQLite synchronously each time, dirty entries
-// are batched in memory and flushed in a single transaction every FLUSH_MS (or
-// when the batch grows large). The in-memory maps remain the authoritative
-// source between flushes, so correctness is unaffected.
-
-const SESSION_FLUSH_MS = 500;
-const SESSION_FLUSH_BATCH = 500;
-
-let pendingSessions = new Map<string, SessionEntry>();
-let flushTimer: NodeJS.Timeout | null = null;
-
-function flushPendingSessionWrites(): void {
-  if (flushTimer) {
-    clearTimeout(flushTimer);
-    flushTimer = null;
-  }
-  if (pendingSessions.size === 0) return;
-  const batch = pendingSessions;
-  pendingSessions = new Map();
+function persistSession(sessionKey: string, entry: SessionEntry): void {
   try {
-    const db = getDatabase();
-    const stmt = db.prepare(`
-      INSERT INTO sessions (session_key, chat_id, account_id, headers, parent_id, history_complete, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(session_key) DO UPDATE SET
-        chat_id = excluded.chat_id,
-        account_id = excluded.account_id,
-        headers = excluded.headers,
-        parent_id = excluded.parent_id,
-        history_complete = excluded.history_complete,
-        updated_at = excluded.updated_at
-    `);
-    const tx = db.transaction((rows: Array<{ session_key: string; chat_id: string; account_id: string; headers: string; parent_id: string | null; history_complete: number; updated_at: number }>) => {
-      for (const row of rows) stmt.run(row.session_key, row.chat_id, row.account_id, row.headers, row.parent_id, row.history_complete, row.updated_at);
+    upsertSession({
+      session_key: sessionKey,
+      chat_id: entry.chatId,
+      account_id: entry.accountId,
+      headers: JSON.stringify(entry.headers || {}),
+      parent_id: entry.parentId,
+      history_complete: entry.historyComplete ? 1 : 0,
+      updated_at: entry.updatedAt,
     });
-    tx([...batch.entries()].map(([session_key, e]) => ({
-      session_key,
-      chat_id: e.chatId,
-      account_id: e.accountId,
-      headers: JSON.stringify(e.headers || {}),
-      parent_id: e.parentId,
-      history_complete: e.historyComplete ? 1 : 0,
-      updated_at: e.updatedAt,
-    })));
   } catch (err: any) {
-    // Keep the in-memory state (authoritative) and drop the failed batch
-    // rather than blocking the request path with back-off writes.
-    console.warn(`[Session] Failed to flush ${batch.size} session write(s) to SQLite:`, err.message);
+    console.warn(`[Session] Failed to persist session ${sessionKey} to SQLite:`, err.message);
   }
-}
-
-function queueSessionWrite(sessionKey: string, entry: SessionEntry): void {
-  pendingSessions.set(sessionKey, entry);
-  if (pendingSessions.size >= SESSION_FLUSH_BATCH) {
-    flushPendingSessionWrites();
-    return;
-  }
-  if (!flushTimer) {
-    flushTimer = setTimeout(flushPendingSessionWrites, SESSION_FLUSH_MS);
-    flushTimer.unref?.();
-  }
-}
-
-/** Flush any pending session writes immediately (used on shutdown). */
-export function flushSessions(): void {
-  flushPendingSessionWrites();
 }
 
 function cleanupSessions(): void {
@@ -160,7 +105,6 @@ function cleanupSessions(): void {
     if (now - entry.updatedAt > sessionTtlMs()) {
       sessions.delete(key);
       chatToSession.delete(entry.chatId);
-      pendingSessions.delete(key);
       try { deleteSession(key); } catch { /* ignore */ }
     }
   }
@@ -187,7 +131,7 @@ export function setSession(sessionKey: string, entry: SessionEntry): void {
   sessions.set(sessionKey, stored);
   chatToSession.set(entry.chatId, sessionKey);
   chatParents.set(entry.chatId, { parentId: entry.parentId, updatedAt: now });
-  queueSessionWrite(sessionKey, stored);
+  persistSession(sessionKey, stored);
 }
 
 export function removeSession(sessionKey: string): void {
@@ -198,7 +142,6 @@ export function removeSession(sessionKey: string): void {
     chatParents.delete(entry.chatId);
   }
   sessions.delete(sessionKey);
-  pendingSessions.delete(sessionKey);
   try { deleteSession(sessionKey); } catch { /* ignore */ }
 }
 
@@ -220,9 +163,9 @@ export function resolveSessionKey(sessionKey: string): string | undefined {
 }
 
 /**
- * Records the last assistant response id for a chat_id and, when that chat is
- * pinned to a session, marks the session history as complete so future turns
- * can use economical mode.
+ * Records the last assistant response id for a chat_id. This is called early
+ * in the stream to enable parent_id threading for subsequent messages.
+ * Does NOT mark historyComplete — that happens only after successful stream completion.
  */
 export function updateSessionParent(chatId: string, parentId: string | null): void {
   loadSessionsFromDb();
@@ -233,9 +176,25 @@ export function updateSessionParent(chatId: string, parentId: string | null): vo
     const session = sessions.get(sessionKey);
     if (session) {
       session.parentId = parentId;
-      session.historyComplete = true;
       session.updatedAt = now;
-      queueSessionWrite(sessionKey, session);
+      persistSession(sessionKey, session);
+    }
+  }
+}
+
+/**
+ * Marks a session's history as complete after the stream finishes successfully.
+ * Only then can economical mode safely rely on Qwen's server-side history.
+ */
+export function markHistoryComplete(chatId: string): void {
+  loadSessionsFromDb();
+  const sessionKey = chatToSession.get(chatId);
+  if (sessionKey) {
+    const session = sessions.get(sessionKey);
+    if (session && !session.historyComplete) {
+      session.historyComplete = true;
+      session.updatedAt = Date.now();
+      persistSession(sessionKey, session);
     }
   }
 }
@@ -256,11 +215,6 @@ export function resetAllSessions(): void {
   sessions.clear();
   chatToSession.clear();
   chatParents.clear();
-  pendingSessions.clear();
-  if (flushTimer) {
-    clearTimeout(flushTimer);
-    flushTimer = null;
-  }
   sessionsLoaded = true;
   try {
     const db = getDatabase();

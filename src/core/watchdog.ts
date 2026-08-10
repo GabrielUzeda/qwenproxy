@@ -2,6 +2,7 @@ import { EventEmitter } from 'events'
 import os from 'os'
 import { config } from './config.js'
 import { metrics } from './metrics.js'
+import { getStreamRegistry } from './stream-registry.js'
 
 interface HealthStatus {
   ram: 'ok' | 'warning' | 'critical'
@@ -104,12 +105,29 @@ export class Watchdog extends EventEmitter {
   }
 
   private async recoverRAM(): Promise<void> {
-    if (global.gc) global.gc()
+    if (global.gc) {
+      global.gc()
+    } else {
+      console.warn('[Watchdog] global.gc() unavailable — start with --expose-gc for effective RAM recovery')
+    }
     await new Promise(resolve => setTimeout(resolve, 100))
     this.emit('recovery:ram:freed')
   }
 
   private async recoverStreams(): Promise<void> {
+    const streams = getStreamRegistry()
+    const now = Date.now()
+    let aborted = 0
+    for (const [id, entry] of streams.entries()) {
+      if (entry.createdAt && now - entry.createdAt > config.timeouts.streamIdle) {
+        entry.abortController.abort()
+        streams.delete(id)
+        aborted++
+      }
+    }
+    if (aborted > 0) {
+      console.warn(`[Watchdog] Aborted ${aborted} stale stream(s) during recovery`)
+    }
     this.emit('recovery:streams:throttled')
   }
 

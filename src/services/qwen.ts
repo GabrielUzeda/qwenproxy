@@ -10,5 +10,6 @@ export {
   getSessionParent,
   getSessionKeyByChatId,
   getSessionCount,
+  markHistoryComplete,
 } from './session-manager.js';
 export type { SessionEntry } from './session-manager.js';

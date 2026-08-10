@@ -6,7 +6,7 @@ import { getIncrementalDelta, parseQwenErrorPayload } from './sse-parser.js';
 import { looksLikeUnwrappedToolCall, parseUnwrappedToolCalls } from './tool-handler.js';
 import { isDegenerateAnswer } from '../utils/degenerate-answer.js';
 import { removeStream } from '../core/stream-registry.js';
-import { updateSessionParent } from '../services/qwen.js';
+import { updateSessionParent, markHistoryComplete } from '../services/qwen.js';
 
 export interface StreamHandlerContext {
   stream: ReadableStream;
@@ -333,8 +333,8 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
                       fastWriteContent(text);
                     }
                   }
-                  for (const tc of toolCalls) {
-                    emitStreamingToolCall(tc, toolParser.getEmittedToolCallCount() - toolCalls.length + toolCalls.indexOf(tc));
+                  for (let idx = 0; idx < toolCalls.length; idx++) {
+                    emitStreamingToolCall(toolCalls[idx], toolParser.getEmittedToolCallCount() - toolCalls.length + idx);
                   }
                 } else {
                   if (vStr) fastWriteContent(vStr);
@@ -418,9 +418,8 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
             });
           }
         }
-        for (const tc of flushResult.toolCalls) {
-          const idx = toolParser.getEmittedToolCallCount() - flushResult.toolCalls.length + flushResult.toolCalls.indexOf(tc);
-          emitStreamingToolCall(tc, idx);
+        for (let idx = 0; idx < flushResult.toolCalls.length; idx++) {
+          emitStreamingToolCall(flushResult.toolCalls[idx], toolParser.getEmittedToolCallCount() - flushResult.toolCalls.length + idx);
         }
       }
 
@@ -455,6 +454,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       }
       bufferedWrite('data: [DONE]\n\n');
       flushWrites();
+      markHistoryComplete(ctx.uiSessionId);
     } finally {
       flushWrites();
       clearInterval(heartbeatInterval);
@@ -572,6 +572,7 @@ export async function collectNonStreamingResult(
   if (toolCallsOut.length) message.tool_calls = toolCallsOut;
 
   removeStream(completionId);
+  markHistoryComplete(uiSessionId);
   completeOnce();
   return {
     status: 200,
