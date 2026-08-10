@@ -1,3 +1,10 @@
+# [1.14.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.13.2...v1.14.0) (2026-08-10)
+
+
+### Features
+
+* economical sessions for tool loops, usage/logs tracking and admin expansion ([9068bfd](https://github.com/pedrofariasx/qwenproxy/commit/9068bfdf762172a87cfe92b50e7aeceb8cb94ac8))
+
 ## [1.13.2](https://github.com/pedrofariasx/qwenproxy/compare/v1.13.1...v1.13.2) (2026-08-10)
 
 
