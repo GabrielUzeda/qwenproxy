@@ -8,7 +8,9 @@ import { config } from '../core/config.js';
 import { getBaseAccountId } from '../core/account-lanes.js';
 import { getStealthScript } from './stealth.js';
 import { getFingerprintProfile, type FingerprintProfile } from './fingerprint.js';
+import { sleep } from '../utils/sleep.js';
 
+export { sleep };
 export type BrowserType = 'chromium' | 'firefox' | 'webkit' | 'chrome' | 'edge';
 
 interface BrowserEngineConfig {
@@ -119,8 +121,6 @@ export const REFRESH_THRESHOLD = 0.7;
 export const GUEST_HEADERS_TTL = 30 * 60 * 1000;
 
 export const PROFILES_DIR = path.resolve(config.browser.userDataDir);
-
-export const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 export const accountContexts = new Map<string, BrowserContext>();
 export const accountPages = new Map<string, Page>();

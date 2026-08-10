@@ -10,16 +10,14 @@ import { BAXIA_IFRAME_SELECTOR, solveBaxiaCaptcha } from './captcha-solver.js';
 import { uploadLargePromptAsFile } from '../routes/upload.js';
 import { getSession, setSession, getSessionParent, updateSessionParent } from './session-manager.js';
 import { buildAnswerDirective } from '../utils/degenerate-answer.js';
+import { sleep } from '../utils/sleep.js';
+import { CACHED_TIMEZONE, QWEN_WEB_VERSION } from '../utils/qwen-constants.js';
 import crypto from 'crypto';
 
 export { updateSessionParent };
 
-const CACHED_TIMEZONE = new Date().toString().split(' (')[0];
-const QWEN_WEB_VERSION = '0.2.66';
 const BASE_TIMEOUT_MS = 120000;
 const TIMEOUT_PER_MB = 30000;
-
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 function assertAntiBotHeaders(headers: Record<string, string>, label: string): void {
   if (!headers['cookie'] || !headers['user-agent'] || !headers['bx-ua'] || !headers['bx-umidtoken'] || !headers['bx-v']) {

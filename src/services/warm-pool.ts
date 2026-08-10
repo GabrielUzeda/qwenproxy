@@ -4,11 +4,8 @@ import { config } from '../core/config.js';
 import { QwenUpstreamError } from './error-handler.js';
 import type { Page } from 'playwright';
 import crypto from 'crypto';
-
-const CACHED_TIMEZONE = new Date().toString().split(' (')[0];
-const QWEN_WEB_VERSION = '0.2.66';
-
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+import { sleep } from '../utils/sleep.js';
+import { CACHED_TIMEZONE, QWEN_WEB_VERSION } from '../utils/qwen-constants.js';
 
 export interface WarmPoolEntry {
   chatId: string;

@@ -1,8 +1,7 @@
 import type { Page } from 'playwright';
 import { humanDrag } from './human-behavior.js';
 import { acquireMouseLock, releaseMouseLock } from './mouse-lock.js';
-
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+import { sleep } from '../utils/sleep.js';
 
 export const BAXIA_IFRAME_SELECTOR = 'iframe#baxia-dialog-content, iframe[src*="_____tmd_____/punish"]';
 

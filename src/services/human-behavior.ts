@@ -1,4 +1,5 @@
 import type { Page } from 'playwright';
+import { sleep } from '../utils/sleep.js';
 
 function gaussianRandom(rng: () => number): number {
   let u = 0, v = 0;
@@ -18,8 +19,6 @@ function cubicBezier(p0: number, p1: number, p2: number, p3: number, t: number):
   const mt = 1 - t;
   return mt * mt * mt * p0 + 3 * mt * mt * t * p1 + 3 * mt * t * t * p2 + t * t * t * p3;
 }
-
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 let globalSeed = Date.now();
 function simpleRng(): number {

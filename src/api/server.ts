@@ -3,6 +3,7 @@ import type { Context } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
 import { serve, type ServerType } from '@hono/node-server'
 import { config } from '../core/config.js'
+import { sleep } from '../utils/sleep.js'
 import { metrics } from '../core/metrics.js'
 import { cache } from '../cache/memory-cache.js'
 import { Watchdog } from '../core/watchdog.js'
@@ -16,8 +17,6 @@ const app = new Hono()
 
 let watchdog: Watchdog
 let server: ServerType | undefined
-
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 function randomDelay(minMs: number, maxMs: number): number {
   const min = Math.max(0, Math.min(minMs, maxMs))
