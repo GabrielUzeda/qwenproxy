@@ -24,6 +24,7 @@ import { handleStreamingResponse, collectNonStreamingResult } from './stream-han
 import { buildAnswerDirective } from '../utils/degenerate-answer.js';
 import { checkUserRateLimit, tryAcquireUserSlot, releaseUserSlot, getUserActiveStreams } from '../core/user-manager.js';
 import type { UserIdentity } from '../core/user-manager.js';
+import { trackUsage, trackModelUsage } from '../core/usage-tracker.js';
 
 export { getIncrementalDelta } from './sse-parser.js';
 export type { DeltaResult } from './sse-parser.js';
@@ -35,7 +36,7 @@ export type { DeltaResult } from './sse-parser.js';
  * served context — and therefore the answers — never diverge from what the
  * client believes the conversation is.
  */
-async function verifyServerContextMatches(sessionKey: string, session: SessionEntry, lastUserContent: string): Promise<boolean> {
+async function verifyServerContextMatches(sessionKey: string, session: SessionEntry, _lastUserContent: string): Promise<boolean> {
   try {
     const history = await fetchQwenChatHistory(
       session.chatId,
@@ -43,62 +44,26 @@ async function verifyServerContextMatches(sessionKey: string, session: SessionEn
       session.accountId === 'global' ? undefined : session.accountId,
       12,
     );
-    if (!history.hasHistory) return false;
+    if (!history.hasHistory || history.messages.length === 0) return false;
     const msgs = history.messages;
+    const last = msgs[msgs.length - 1];
 
-    // Structural check: economical mode relies on server-side history, so the
-    // server must have at least one complete user→assistant exchange before the
-    // current user turn. A bare "Nova Conversa" with only the first user message
-    // means historyComplete was set prematurely (stream started but never finished).
-    const assistantCount = msgs.filter(m => m.role === 'assistant').length;
-    const userCount = msgs.filter(m => m.role === 'user').length;
-    if (assistantCount === 0 || userCount < 2) {
-      console.warn(`[Chat] Session ${sessionKey}: server history incomplete (${userCount} user, ${assistantCount} assistant). Re-bootstrapping.`);
+    // The server must be synced exactly to our parent: the last message must
+    // be the assistant reply we threaded onto. If it moved past it (extra user
+    // turn / edits elsewhere), fall back to a full re-bootstrap.
+    if (last.role !== 'assistant') return false;
+
+    // Adopt the parent when we do not have one yet (e.g. the stream never
+    // emitted response.created). The chat is pinned to this session, so its
+    // most recent assistant reply is ours to thread onto.
+    if (!session.parentId) {
+      session.parentId = last.id;
+      return true;
+    }
+    if (last.id !== session.parentId) {
+      console.warn(`[Chat] Session ${sessionKey}: server parent (${last.id}) != tracked (${session.parentId}). Re-syncing.`);
       return false;
     }
-
-    // Find the last user message on the server.
-    let lastUserMsg;
-    let lastUserIdx = -1;
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      if (msgs[i].role === 'user') {
-        lastUserMsg = msgs[i];
-        lastUserIdx = i;
-        break;
-      }
-    }
-    if (!lastUserMsg) return false;
-
-    // Verify the last user message content matches what the client is sending.
-    const marker = `User: ${(lastUserContent || '').trim()}`;
-    const content = lastUserMsg.content || '';
-    if (!content.trimEnd().endsWith(marker) && !content.includes(marker)) {
-      console.warn(`[Chat] Session ${sessionKey}: server last user turn does not match client (expected marker "${marker.slice(0, 60)}...")`);
-      return false;
-    }
-
-    // The user message must be threaded onto the assistant reply we recorded.
-    if (session.parentId && lastUserMsg.parentId !== session.parentId) {
-      console.warn(`[Chat] Session ${sessionKey}: parent mismatch (server=${lastUserMsg.parentId}, tracked=${session.parentId}). Re-syncing.`);
-      return false;
-    }
-
-    // Verify there is an assistant message immediately before the last user
-    // message, confirming the conversation is properly threaded (not orphaned).
-    let hasAssistantBeforeLastUser = false;
-    for (let i = lastUserIdx - 1; i >= 0; i--) {
-      if (msgs[i].role === 'assistant') {
-        hasAssistantBeforeLastUser = true;
-        break;
-      }
-      // Skip over contiguous user messages (multi-turn user input).
-      if (msgs[i].role !== 'user') break;
-    }
-    if (lastUserIdx > 0 && !hasAssistantBeforeLastUser) {
-      console.warn(`[Chat] Session ${sessionKey}: no assistant reply before last user message. History may be corrupted.`);
-      return false;
-    }
-
     return true;
   } catch (err: any) {
     console.warn(`[Chat] Session verification failed for ${sessionKey}:`, err.message);
@@ -109,13 +74,8 @@ async function verifyServerContextMatches(sessionKey: string, session: SessionEn
 /**
  * Builds a compact summary of the most recent assistant tool calls and tool
  * responses to embed in the economical prompt. Without this, economical mode
- * sends only `system + last user message` and the model loses stateful context
+ * only sends `system + last user message` and the model loses stateful context
  * like to-do lists, file edits, or other actions it performed on prior turns.
- *
- * Includes:
- * - The last assistant message text (often contains the current to-do state)
- * - Recent tool call names + arguments (compact)
- * - Recent tool response summaries (compact)
  */
 function buildRecentToolContext(
   messages: Array<{ role: string; content: string | null; tool_calls?: any[]; tool_call_id?: string; name?: string }>,
@@ -131,16 +91,19 @@ function buildRecentToolContext(
     }
   }
 
-  // Walk backwards collecting the most recent tool-related turns.
-  // Stop at the first plain user message we encounter (the current request).
+  // Peel trailing user message(s): the current prompt is the LAST user message,
+  // so the tool activity of THIS cycle sits just before it.
+  let i = messages.length - 1;
+  while (i >= 0 && messages[i].role === 'user') i--;
+
   const toolTurns: string[] = [];
   const MAX_TOOL_TURNS = 6;
   const MAX_ARG_CHARS = 400;
   const MAX_RESPONSE_CHARS = 600;
 
-  for (let i = messages.length - 1; i >= 0 && toolTurns.length < MAX_TOOL_TURNS * 2; i--) {
+  for (; i >= 0 && toolTurns.length < MAX_TOOL_TURNS * 2; i--) {
     const msg = messages[i];
-
+    // A user message below the trailing tail marks the start of the cycle.
     if (msg.role === 'user') break;
 
     if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
@@ -154,8 +117,6 @@ function buildRecentToolContext(
         if (argsStr.length > MAX_ARG_CHARS) argsStr = argsStr.slice(0, MAX_ARG_CHARS) + '...[truncated]';
         toolTurns.unshift(`  [call] ${name}(${argsStr})`);
       }
-      // Include the assistant text that preceded these tool calls (often contains
-      // the current to-do state or plan).
       const assistantText = (typeof msg.content === 'string' ? msg.content : '').trim();
       if (assistantText) {
         const truncated = assistantText.length > MAX_RESPONSE_CHARS
@@ -186,6 +147,8 @@ export async function chatCompletions(c: Context) {
     userSlotReleased = true;
     releaseUserSlot(user.id);
   };
+  let usageInputChars = 0;
+  let usageModel = '';
 
   try {
     const body: OpenAIRequest = await c.req.json();
@@ -330,6 +293,9 @@ export async function chatCompletions(c: Context) {
     }
 
     const modelId = body.model.replace('-no-thinking', '').replace('-thinking', '');
+    const inputChars = (systemPrompt + prompt).length;
+    usageInputChars = inputChars;
+    usageModel = modelId;
     const modelContextWindow = getModelContextWindow(modelId)
     const estimatedTokens = estimateTokenCount(systemPrompt + prompt, modelId);
     const forcedToolName = getForcedToolName(bodyAny.tool_choice);
@@ -366,12 +332,19 @@ export async function chatCompletions(c: Context) {
     const sessionKey = rawSessionKey ? (resolveSessionKey(rawSessionKey) ?? rawSessionKey) : undefined;
     const session = sessionKey ? getSession(sessionKey) : undefined;
     const lastMsg = messages[messages.length - 1];
+    // Economical mode sends only the trailing cycle (tool calls, tool
+    // responses and the final user message). It is safe for tool loops because
+    // the cycle text carries the tool state; older turns stay server-side.
+    // Economical mode is safe for tool conversations: it sends the final user
+    // message plus a compact summary of the trailing tool activity while the
+    // rest of the conversation stays threaded server-side. Prior context is
+    // guaranteed by historyComplete + the parent-based server verification, so
+    // even all-tool_calls conversations can economize.
     let canEconomize = !!(
       session?.historyComplete &&
       session.accountId !== 'guest' &&
       lastMsg?.role === 'user' &&
       lastUserContent &&
-      !hasToolConversation &&
       pendingMultimodal.length === 0
     );
 
@@ -619,10 +592,14 @@ export async function chatCompletions(c: Context) {
         completed = await collectResponse(retried.stream, retried.uiSessionId);
       }
 
+      trackUsage(user ? user.id : 'anonymous', inputChars, completed.status !== 200);
+      trackModelUsage(modelId);
       releaseUserSlotOnce();
       return c.json(completed.body, completed.status as any);
     }
 
+    trackUsage(user ? user.id : 'anonymous', inputChars, false);
+    trackModelUsage(modelId);
     return handleStreamingResponse(c, {
       stream: acquired.stream,
       completionId,
@@ -646,6 +623,8 @@ export async function chatCompletions(c: Context) {
     if (status >= 500) {
       metrics.increment('requests.errors')
     }
+    trackUsage(user ? user.id : 'anonymous', usageInputChars, true);
+    trackModelUsage(usageModel);
     return c.json({ error: { message: err.message } }, status)
   }
 }

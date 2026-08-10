@@ -45,7 +45,9 @@ function sseAnswer(content: string, responseId = 'rcon-x'): Response {
   }), { status: 200 });
 }
 
-function historyResponse(lastUserContent: string, parentId: string): Response {
+function historyResponse(_lastUserContent: string, parentId: string): Response {
+  // Server history synced UP TO the recorded parent: the last message is the
+  // assistant reply we threaded onto (the client's new turn has not been sent).
   return new Response(JSON.stringify({
     success: true,
     data: {
@@ -53,7 +55,6 @@ function historyResponse(lastUserContent: string, parentId: string): Response {
         messages: [
           { id: 'u1', role: 'user', content: 'User: Turn 1' },
           { id: parentId, role: 'assistant', content: 'Reply 1', parentId: 'u1' },
-          { id: 'u2', role: 'user', content: lastUserContent, parentId },
         ],
       },
     },

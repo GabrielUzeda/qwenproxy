@@ -147,3 +147,26 @@ test('robustParseJSON: handles missing opening quote with unquoted key', () => {
   assert.strictEqual(result.name, 'read');
   assert.strictEqual(result.arguments.filePath, '/tmp/test.ts');
 });
+
+test('robustParseJSON: handles equals separator instead of colon (unquoted key)', () => {
+  const result = robustParseJSON('{"name":read,arguments ={"filePath":"/home/pedro/test.ts","offset":400,"limit":310}}');
+  assert.ok(result);
+  assert.strictEqual(result.name, 'read');
+  assert.strictEqual(result.arguments.filePath, '/home/pedro/test.ts');
+  assert.strictEqual(result.arguments.offset, 400);
+  assert.strictEqual(result.arguments.limit, 310);
+});
+
+test('robustParseJSON: handles equals separator with quoted key', () => {
+  const result = robustParseJSON('{"name": "bash", "arguments" = {"command": "ls -la"}}');
+  assert.ok(result);
+  assert.strictEqual(result.name, 'bash');
+  assert.strictEqual(result.arguments.command, 'ls -la');
+});
+
+test('robustParseJSON: handles equals separator with spaces around it', () => {
+  const result = robustParseJSON('{"name" = "read", "arguments" = {"filePath": "/tmp/x.ts"}}');
+  assert.ok(result);
+  assert.strictEqual(result.name, 'read');
+  assert.strictEqual(result.arguments.filePath, '/tmp/x.ts');
+});

@@ -196,8 +196,11 @@ test('hybrid-session: tools disable economical mode', async () => {
     await res2.text();
 
     assert.strictEqual(capturedPayloads.length, 2);
-    assert.ok(capturedPayloads[1].messages[0].content.includes('T1'), 'Tool loops must always send the full conversation');
-    assert.ok(capturedPayloads[1].messages[0].content.includes('Tool Response (read_file): file content'));
+    assert.strictEqual(capturedPayloads[1].parent_id, 'qwen-tool-1', 'must thread onto the previous response');
+    const content = capturedPayloads[1].messages[0].content;
+    assert.ok(!content.includes('T1'), 'tool loops now economize: pre-cycle history stays server-side');
+    assert.ok(content.includes('[tool_response read_file] file content'), 'tool responses preserved as a compact summary');
+    assert.ok(content.includes('User: T2'), 'final user message must be included');
   } finally {
     restore();
     delete process.env.TEST_SESSION_ID;
@@ -245,11 +248,65 @@ test('hybrid-session: tool responses in history disable economical mode even wit
     await r2.text();
 
     assert.strictEqual(capturedPayloads.length, 2);
+    assert.strictEqual(capturedPayloads[1].parent_id, 'noparam-tool-1', 'must thread onto the previous response');
     const second = capturedPayloads[1].messages[0].content;
-    assert.ok(second.includes('T1'), 'full conversation must be sent on a tool-loop turn');
-    assert.ok(second.includes('Tool Response (read_file): file x'), 'tool responses must stay in context');
-    assert.ok(second.includes('T2'));
-    assert.ok(!second.endsWith('User: T2'), 'must not be economical (only last message)');
+    assert.ok(!second.includes('T1'), 'tool loops economize even without the tools param');
+    assert.ok(second.includes('[tool_response read_file] file x'), 'tool responses preserved as a compact summary');
+    assert.ok(second.includes('User: T2'), 'final user message must be included');
+  } finally {
+    restore();
+    delete process.env.TEST_SESSION_ID;
+  }
+});
+
+test('hybrid-session: tool cycle after a text reply is economical (sends only the trailing cycle)', async () => {
+  resetAllSessions();
+  const capturedPayloads: any[] = [];
+
+  const restore = setupFetchMock((_url, init) => {
+    capturedPayloads.push(JSON.parse(init?.body as string || '{}'));
+    return sseResponse(capturedPayloads.length === 1 ? ['cyc-1'] : ['cyc-2']);
+  });
+
+  try {
+    process.env.TEST_SESSION_ID = 'hybrid-cycle-chat';
+
+    const r1 = await app.fetch(new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3.6-plus', user: 'conv-cycle', messages: [{ role: 'user', content: 'T1' }] })
+    }));
+    assert.strictEqual(r1.status, 200);
+    await r1.text();
+
+    // Turn 2: a tool cycle AFTER a completed text reply. Economical mode must
+    // send only the trailing cycle (tool_calls + tool + final user), relying on
+    // the server-side history for everything before it.
+    const r2 = await app.fetch(new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        user: 'conv-cycle',
+        messages: [
+          { role: 'user', content: 'T1' },
+          { role: 'assistant', content: 'Reply 1' },
+          { role: 'assistant', content: '', tool_calls: [{ id: 'call_2', type: 'function', function: { name: 'read_file', arguments: '{"path":"x"}' } }] },
+          { role: 'tool', tool_call_id: 'call_2', name: 'read_file', content: 'file x' },
+          { role: 'user', content: 'T3' }
+        ]
+      })
+    }));
+    assert.strictEqual(r2.status, 200);
+    await r2.text();
+
+    assert.strictEqual(capturedPayloads.length, 2);
+    const second = capturedPayloads[1].messages[0].content;
+    assert.strictEqual(capturedPayloads[1].parent_id, 'cyc-1', 'must thread onto the previous response');
+    assert.ok(!second.includes('T1'), 'must not resend pre-cycle history');
+    assert.ok(second.includes('RECENT TOOL ACTIVITY'), 'must include the compact tool-state summary');
+    assert.ok(second.includes('[tool_response read_file]'), 'tool responses of the cycle must be summarized');
+    assert.ok(second.includes('User: T3'), 'final user message must be included');
   } finally {
     restore();
     delete process.env.TEST_SESSION_ID;

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
-import { KeyRound, Plus, Pencil, RefreshCw, Trash2 } from 'lucide-react'
+import { KeyRound, Plus, Pencil, RefreshCw, Trash2, Copy } from 'lucide-react'
 import { api, genKey, type AdminUser } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -91,7 +91,20 @@ export function UsersPage() {
                 users.map((u) => (
                   <TableRow key={u.id}>
                     <TableCell className="font-medium">{u.email ?? u.id}</TableCell>
-                    <TableCell className="font-mono text-xs text-muted-foreground">{u.apiKey}</TableCell>
+                    <TableCell className="font-mono text-xs text-muted-foreground">
+                      <div className="flex items-center gap-1">
+                        {u.apiKey}
+                        <button
+                          className="rounded p-0.5 hover:bg-accent"
+                          onClick={() => {
+                            navigator.clipboard.writeText(u.apiKey)
+                            toast.success('Chave copiada')
+                          }}
+                        >
+                          <Copy className="size-3" />
+                        </button>
+                      </div>
+                    </TableCell>
                     <TableCell className="text-right">{u.rateLimitRpm}</TableCell>
                     <TableCell className="text-right">{u.maxConcurrency}</TableCell>
                     <TableCell className="text-right">{u.activeStreams}</TableCell>

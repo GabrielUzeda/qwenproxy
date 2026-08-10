@@ -41,6 +41,8 @@ export function AccountsPage() {
 
   useEffect(() => {
     load()
+    const t = setInterval(load, 5000)
+    return () => clearInterval(t)
   }, [load])
 
   async function add() {

@@ -20,12 +20,15 @@ import {
   getAccountActiveLoad,
   getInUseAccounts,
 } from '../core/account-manager.js'
-import { listUsers, upsertUser, deleteUserById, getUserById } from '../core/database.js'
+import { listUsers, upsertUser, deleteUserById, getUserById, listSessions } from '../core/database.js'
 import { getUserActiveStreams } from '../core/user-manager.js'
-import { getSessionCount } from '../services/session-manager.js'
+import { getSessionCount, removeSession, resetAllSessions } from '../services/session-manager.js'
 import { getAllSeries } from '../core/time-series.js'
 import { readEnvFile, persistEnvPatch, restartServer, SETTINGS_ALLOWLIST, SETTINGS_SECRETS, BOOLEAN_KEYS, INTEGER_KEYS } from '../core/env-settings.js'
 import { renderDashboard } from './admin-dashboard.js'
+import { logBuffer } from '../core/log-buffer.js'
+import { getTopUsers, getModelUsage } from '../core/usage-tracker.js'
+import { getModelContextWindow } from '../core/model-registry.js'
 
 export const adminApp = new Hono()
 
@@ -405,6 +408,137 @@ adminApp.post('/api/restart', adminGuard, (c) => {
 
 adminApp.get('/api/metrics', adminGuard, (c) => {
   return c.text(metrics.formatPrometheus(), { headers: { 'Content-Type': 'text/plain; version=0.0.4' } })
+})
+
+// --- Logs (SSE stream + buffer) ---------------------------------------------
+
+adminApp.get('/api/logs', adminGuard, (c) => {
+  const since = Number(c.req.query('since') || 0)
+  const entries = since > 0 ? logBuffer.getSince(since) : logBuffer.getAll()
+  return c.json(entries)
+})
+
+adminApp.post('/api/logs/clear', adminGuard, (c) => {
+  logBuffer.clear()
+  return c.json({ ok: true })
+})
+
+adminApp.get('/api/logs/live', adminGuard, (c) => {
+  return streamSSE(c, async (stream) => {
+    const listener = async (entry: any) => {
+      try {
+        await stream.writeSSE({ data: JSON.stringify(entry), event: 'log' })
+      } catch { /* client gone */ }
+    }
+    logBuffer.addListener(listener)
+    try {
+      while (true) {
+        await stream.sleep(5000)
+        if (c.req.raw.signal.aborted || stream.closed) break
+      }
+    } catch { /* client disconnected */ }
+    finally {
+      logBuffer.removeListener(listener)
+    }
+  })
+})
+
+// --- Sessions ---------------------------------------------------------------
+
+adminApp.get('/api/sessions', adminGuard, (c) => {
+  const rows = listSessions()
+  const now = Date.now()
+  const ttlMs = config.hybridSessions.ttlMs
+  return c.json(rows.map((r) => ({
+    sessionKey: r.session_key,
+    chatId: r.chat_id,
+    accountId: r.account_id,
+    parentId: r.parent_id,
+    historyComplete: r.history_complete !== 0,
+    updatedAt: r.updated_at,
+    ttlRemaining: Math.max(0, ttlMs - (now - r.updated_at)),
+  })))
+})
+
+adminApp.delete('/api/sessions/:key', adminGuard, (c) => {
+  removeSession(c.req.param('key'))
+  return c.json({ ok: true })
+})
+
+adminApp.post('/api/sessions/clear', adminGuard, (c) => {
+  resetAllSessions()
+  return c.json({ ok: true })
+})
+
+// --- Models -----------------------------------------------------------------
+
+adminApp.get('/api/models', adminGuard, (c) => {
+  const usage = getModelUsage()
+  const entries = Object.entries(usage).sort(([, a], [, b]) => b - a)
+  const models = entries.map(([id, count]) => ({
+    id,
+    contextWindow: getModelContextWindow(id),
+    requestCount: count,
+  }))
+  return c.json(models)
+})
+
+// --- Usage stats ------------------------------------------------------------
+
+adminApp.get('/api/usage', adminGuard, (c) => {
+  const topLimit = Number(c.req.query('limit') || 20)
+  return c.json({
+    users: getTopUsers(topLimit).map(u => {
+      const users = listUsers()
+      const user = users.find(usr => usr.id === u.userId)
+      return { ...u, email: user?.email || u.userId }
+    }),
+    models: getModelUsage(),
+  })
+})
+
+// --- Playground (test chat) -------------------------------------------------
+
+adminApp.post('/api/test-chat', adminGuard, async (c) => {
+  const body = await c.req.json().catch(() => null)
+  if (!body) return c.json({ error: 'body required' }, 400)
+  const stream = body.stream !== false
+  const payload = {
+    model: body.model || 'qwen-plus',
+    messages: body.messages || [],
+    stream,
+    ...(body.tools ? { tools: body.tools } : {}),
+    ...(body.thinking ? { thinking: body.thinking } : {}),
+  }
+  const apiKey = process.env.API_KEY || config.apiKey || 'sk-no-key'
+  const res = await fetch(`http://127.0.0.1:${config.server.port}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(payload),
+  })
+  if (stream) {
+    c.header('Content-Type', 'text/event-stream')
+    c.header('Cache-Control', 'no-cache')
+    c.header('Connection', 'keep-alive')
+    return streamSSE(c, async (s) => {
+      try {
+        const reader = res.body?.getReader()
+        if (!reader) return
+        const decoder = new TextDecoder()
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          const chunk = decoder.decode(value, { stream: true })
+          await s.writeSSE({ data: chunk })
+        }
+      } catch { /* ignore */ }
+    })
+  }
+  const json = await res.json()
+  return c.json(json)
 })
 
 // --- SPA (React + shadcn build) ---------------------------------------------

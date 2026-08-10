@@ -1,12 +1,15 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
+import { BrowserRouter } from 'react-router-dom'
 import { Toaster } from 'sonner'
 import './index.css'
 import { App } from './App'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
-    <Toaster theme="dark" position="bottom-right" richColors />
+    <BrowserRouter basename="/admin">
+      <App />
+    </BrowserRouter>
+    <Toaster position="bottom-right" richColors />
   </StrictMode>
 )

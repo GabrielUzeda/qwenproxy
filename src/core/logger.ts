@@ -94,3 +94,28 @@ export class Logger {
 }
 
 export const logger = new Logger('info');
+
+import { logBuffer } from './log-buffer.js';
+
+const origConsoleLog = console.log;
+const origConsoleWarn = console.warn;
+const origConsoleError = console.error;
+
+console.log = (...args: any[]) => {
+  origConsoleLog.apply(console, args);
+  const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+  const level = msg.includes('ERROR') ? 'error' : msg.includes('WARN') ? 'warn' : msg.includes('DEBUG') ? 'debug' : 'info';
+  logBuffer.push(level as any, msg);
+};
+
+console.warn = (...args: any[]) => {
+  origConsoleWarn.apply(console, args);
+  const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+  logBuffer.push('warn', msg);
+};
+
+console.error = (...args: any[]) => {
+  origConsoleError.apply(console, args);
+  const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+  logBuffer.push('error', msg);
+};

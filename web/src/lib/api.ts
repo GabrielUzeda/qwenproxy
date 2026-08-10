@@ -80,6 +80,45 @@ export interface SettingsData {
   effective: Record<string, number | boolean>
 }
 
+export interface LogEntry {
+  id: number
+  timestamp: string
+  level: 'debug' | 'info' | 'warn' | 'error'
+  message: string
+  context?: string
+  data?: Record<string, unknown>
+}
+
+export interface SessionInfo {
+  sessionKey: string
+  chatId: string
+  accountId: string
+  parentId: string | null
+  historyComplete: boolean
+  updatedAt: number
+  ttlRemaining: number
+}
+
+export interface ModelInfo {
+  id: string
+  contextWindow: number
+  requestCount: number
+}
+
+export interface UsageUser {
+  userId: string
+  email: string
+  requestCount: number
+  errorCount: number
+  totalTokens: number
+  lastRequestAt: number
+}
+
+export interface UsageData {
+  users: UsageUser[]
+  models: Record<string, number>
+}
+
 export const api = {
   overview: () => request<Overview>('/overview'),
   accounts: () => request<{ accounts: Account[]; inUse: string[] }>('/accounts'),
@@ -97,6 +136,20 @@ export const api = {
     const res = await fetch('/admin/api/metrics')
     if (!res.ok) throw new ApiError(res.status, 'Falha ao buscar métricas')
     return res.text()
+  },
+  logs: (since?: number) => request<LogEntry[]>(`/logs${since ? `?since=${since}` : ''}`),
+  clearLogs: () => request('/logs/clear', { method: 'POST' }),
+  sessions: () => request<SessionInfo[]>('/sessions'),
+  deleteSession: (key: string) => request(`/sessions/${key}`, { method: 'DELETE' }),
+  clearSessions: () => request('/sessions/clear', { method: 'POST' }),
+  models: () => request<ModelInfo[]>('/models'),
+  usage: (limit?: number) => request<UsageData>(`/usage${limit ? `?limit=${limit}` : ''}`),
+  testChat: async (payload: { model: string; messages: Array<{ role: string; content: string }>; stream: boolean; thinking?: { type: string } }): Promise<Response> => {
+    return fetch('/admin/api/test-chat', {
+      method: 'POST',
+      headers: { 'ent-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
   },
 }
 
