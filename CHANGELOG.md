@@ -1,3 +1,10 @@
+## [1.13.2](https://github.com/pedrofariasx/qwenproxy/compare/v1.13.1...v1.13.2) (2026-08-10)
+
+
+### Bug Fixes
+
+* preserve economical mode context for tool workflows and harden admin/metrics surface ([328f7f4](https://github.com/pedrofariasx/qwenproxy/commit/328f7f4ec5f9e3cfd0d1c81c1af9e0c3a0cdf6fc))
+
 ## [1.13.1](https://github.com/pedrofariasx/qwenproxy/compare/v1.13.0...v1.13.1) (2026-08-09)
 
 
