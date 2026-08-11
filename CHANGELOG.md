@@ -1,3 +1,10 @@
+## [1.17.1](https://github.com/pedrofariasx/qwenproxy/compare/v1.17.0...v1.17.1) (2026-08-11)
+
+
+### Bug Fixes
+
+* tool call streaming corruption and add tool-call emission diagnostics ([84de0a5](https://github.com/pedrofariasx/qwenproxy/commit/84de0a52c7bf922bda8874bffbaf2eb88010471b))
+
 # [1.17.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.16.0...v1.17.0) (2026-08-11)
 
 
