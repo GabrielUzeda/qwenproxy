@@ -60,6 +60,7 @@ const envSchema = z.object({
   ACCOUNT_LANES: envInt(1, 1),
   ACCOUNT_MAX_CONCURRENT_STREAMS: envInt(2, 1),
   ACCOUNT_STREAM_SLOT_WAIT_MS: envInt(30000, 1000),
+  QWEN_DIRECT_FETCH: envBool(true),
   LARGE_PROMPT_THRESHOLD: envInt(524288, 1),
   HYBRID_SESSIONS_ENABLED: envBool(true),
   HYBRID_SESSION_VERIFY: envBool(true),
@@ -154,6 +155,9 @@ export const config = {
     lanes: env.ACCOUNT_LANES,
     maxStreamsPerAccount: env.ACCOUNT_MAX_CONCURRENT_STREAMS,
     streamSlotWaitMs: env.ACCOUNT_STREAM_SLOT_WAIT_MS,
+  },
+  directFetch: {
+    enabled: env.QWEN_DIRECT_FETCH,
   },
   precapture: {
     headersStartup: env.PRECAPTURE_HEADERS_STARTUP,

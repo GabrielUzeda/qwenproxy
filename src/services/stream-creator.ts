@@ -6,6 +6,7 @@ import { getWarmedChat, releaseWarmChat } from './warm-pool.js';
 import { getClientHintsHeaders } from './browser-manager.js';
 import type { Page } from 'playwright';
 import { releaseAccountInUse, acquireAccountStreamSlot } from '../core/account-manager.js';
+import { getBaseAccountId } from '../core/account-lanes.js';
 import { BAXIA_IFRAME_SELECTOR, solveBaxiaCaptcha } from './captcha-solver.js';
 import { uploadLargePromptAsFile } from '../routes/upload.js';
 import { getSession, setSession, getSessionParent, updateSessionParent } from './session-manager.js';
@@ -66,6 +67,97 @@ function buildNodeCompletionHeaders(headers: Record<string, string>, chatId: str
     'source': 'web',
     ...getClientHintsHeaders(accountId),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Direct (Node-side) completion fast path with a per-account circuit breaker.
+//
+// The browser relay streams every SSE chunk across the CDP bridge
+// (page.evaluate + __streamRelay), which is a serialized round-trip per chunk
+// and also requires the lane page to be on the chat.qwen.ai origin. For
+// multi-account setups the biggest throughput/latency lever is to POST the
+// completion directly from Node using the already-captured anti-bot headers —
+// no bridge, no page wait. If the backend answers with a TMD challenge or a
+// body we cannot trust, we fall back to the proven browser relay. After
+// repeated failures the circuit breaker opens per real account (5 min) so
+// accounts that dislike direct fetches stay on the relay path automatically.
+// ---------------------------------------------------------------------------
+
+const directFetchFailures = new Map<string, number>();
+const directFetchBlockedUntil = new Map<string, number>();
+const DIRECT_FETCH_FAILURE_THRESHOLD = 3;
+const DIRECT_FETCH_BLOCK_MS = 5 * 60 * 1000;
+
+function canUseDirectFetch(accountId?: string): boolean {
+  if (!config.directFetch.enabled) return false;
+  if (!accountId || accountId === 'guest' || accountId === 'global') return false;
+  const base = getBaseAccountId(accountId) || accountId;
+  return (directFetchBlockedUntil.get(base) || 0) <= Date.now();
+}
+
+function recordDirectFetchSuccess(accountId?: string): void {
+  if (!accountId) return;
+  directFetchFailures.delete(getBaseAccountId(accountId) || accountId);
+}
+
+function recordDirectFetchFailure(accountId?: string): void {
+  if (!accountId) return;
+  const base = getBaseAccountId(accountId) || accountId;
+  const failures = (directFetchFailures.get(base) || 0) + 1;
+  directFetchFailures.set(base, failures);
+  if (failures >= DIRECT_FETCH_FAILURE_THRESHOLD) {
+    directFetchBlockedUntil.set(base, Date.now() + DIRECT_FETCH_BLOCK_MS);
+    console.warn(`[Qwen] Direct fetch circuit opened for account ${base} for ${DIRECT_FETCH_BLOCK_MS / 1000}s after ${failures} consecutive failures`);
+  }
+}
+
+/**
+ * Attempts the completions POST directly from Node. Returns undefined for
+ * anything that is not a clean SSE success so the caller falls back to the
+ * browser relay. Real upstream failures (429 / RateLimited / chat in progress)
+ * propagate instead of being doubled through the relay.
+ */
+async function tryDirectCompletionFetch(
+  accountId: string,
+  chatId: string,
+  url: string,
+  payloadJson: string,
+  chatHeaders: Record<string, string>,
+  timeoutMs: number,
+): Promise<{ stream: ReadableStream<Uint8Array>; controller: AbortController } | undefined> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: buildNodeCompletionHeaders(chatHeaders, chatId, accountId),
+      body: payloadJson,
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    const contentType = response.headers.get('content-type') || '';
+    if (response.ok && contentType.includes('text/event-stream') && response.body) {
+      recordDirectFetchSuccess(accountId);
+      return { stream: response.body as ReadableStream<Uint8Array>, controller };
+    }
+
+    const bodyText = await response.text().catch(() => '');
+    if (isTmdChallenge(bodyText)) {
+      recordDirectFetchFailure(accountId);
+      return undefined;
+    }
+    if (!response.ok) {
+      handleErrorBody(bodyText, response.status);
+    }
+    recordDirectFetchFailure(accountId);
+    return undefined;
+  } catch (err: any) {
+    controller.abort();
+    if (err instanceof QwenUpstreamError || err instanceof RetryableQwenStreamError) throw err;
+    recordDirectFetchFailure(accountId);
+    return undefined;
+  }
 }
 
 async function openIsolatedQwenPage(basePage: Page, targetUrl = 'https://chat.qwen.ai/'): Promise<Page> {
@@ -913,6 +1005,35 @@ export async function createQwenStream(
     const timeoutMs = BASE_TIMEOUT_MS + Math.ceil(payloadMB * TIMEOUT_PER_MB);
 
     const url = `https://chat.qwen.ai/api/v2/chat/completions?chat_id=${chatId}`;
+
+    // Direct fast path: POST from Node with the captured anti-bot headers,
+    // skipping both the CDP bridge and the page-readiness wait. Anything but a
+    // clean SSE success falls back to the browser relay below, and the
+    // per-account circuit breaker opens after repeated failures.
+    if (
+      effectiveAccountId &&
+      !process.env.TEST_MOCK_PLAYWRIGHT &&
+      canUseDirectFetch(effectiveAccountId)
+    ) {
+      const direct = await tryDirectCompletionFetch(
+        effectiveAccountId,
+        chatId,
+        url,
+        payloadJson,
+        chatHeaders,
+        timeoutMs,
+      );
+      if (direct) {
+        const controller = direct.controller;
+        return {
+          stream: wrapLeasedStream(direct.stream, controller, timeoutMs, `Qwen direct stream ${chatId}`, () => controller.abort()),
+          headers: chatHeaders,
+          uiSessionId: chatId,
+          controller,
+          accountId: returnAccountKey,
+        };
+      }
+    }
 
     // The lane's page can transiently be off-origin (mid-`goto`, blank while a
     // background header capture is warming it). Instead of instantly refusing
