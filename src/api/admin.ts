@@ -13,13 +13,15 @@ import path from 'path'
 import { config } from '../core/config.js'
 import { metrics } from '../core/metrics.js'
 import { cache } from '../cache/memory-cache.js'
-import { addAccount, removeAccount, listAccounts, updateAccountCooldown } from '../core/accounts.js'
+import { addAccount, removeAccount, listAccounts } from '../core/accounts.js'
 import { getWarmPoolStats } from '../services/warm-pool.js'
 import {
   getAccountCooldownInfo,
   getAccountActiveLoad,
   getInUseAccounts,
   clearAccountCooldown,
+  isAccountReady,
+  getReadyAccountCount,
 } from '../core/account-manager.js'
 import { listUsers, upsertUser, deleteUserById, getUserById, listSessions } from '../core/database.js'
 import { getUserActiveStreams } from '../core/user-manager.js'
@@ -185,6 +187,7 @@ async function buildOverview(): Promise<any> {
     cooldown: getAccountCooldownInfo(a.id)?.remainingMs ?? 0,
     cooldownReason: getAccountCooldownInfo(a.id)?.reason ?? null,
     activeLoad: getAccountActiveLoad(a.id),
+    ready: isAccountReady(a.id),
   }))
   const inUse = getInUseAccounts()
 
@@ -219,6 +222,9 @@ async function buildOverview(): Promise<any> {
     guestMode: process.env.QWEN_GUEST_MODE_ONLY === 'true',
     singleAccountMode: config.accounts.singleAccountMode,
     lanes: config.accounts.lanes,
+    maxStreamsPerAccount: config.accounts.maxStreamsPerAccount,
+    streamSlotWaitMs: config.accounts.streamSlotWaitMs,
+    readyAccountCount: getReadyAccountCount(),
     userRateLimitRpm: config.users.defaultRateLimitRpm,
     userMaxConcurrency: config.users.defaultMaxConcurrency,
     hybridVerify: config.hybridSessions.verify,
@@ -263,6 +269,7 @@ adminApp.get('/api/accounts', adminGuard, (c) => {
     cooldown: getAccountCooldownInfo(a.id)?.remainingMs ?? 0,
     cooldownReason: getAccountCooldownInfo(a.id)?.reason ?? null,
     activeLoad: getAccountActiveLoad(a.id),
+    ready: isAccountReady(a.id),
   }))
   return c.json({ accounts, inUse: [...getInUseAccounts()] })
 })
@@ -287,7 +294,10 @@ adminApp.delete('/api/accounts/:id', adminGuard, (c) => {
 })
 
 adminApp.post('/api/accounts/:id/clear-cooldown', adminGuard, (c) => {
-  updateAccountCooldown(c.req.param('id'), 0, null)
+  // Clears BOTH the in-memory cooldown (which getAccountCooldownInfo checks
+  // first) and the persisted DB row. updateAccountCooldown(id,0,null) would
+  // only clear the DB and leave the account stuck on cooldown in memory.
+  clearAccountCooldown(c.req.param('id'))
   return c.json({ ok: true })
 })
 
