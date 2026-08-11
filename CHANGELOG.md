@@ -1,3 +1,10 @@
+## [1.19.1](https://github.com/pedrofariasx/qwenproxy/compare/v1.19.0...v1.19.1) (2026-08-11)
+
+
+### Bug Fixes
+
+* docker-compose port mapping, optional env file and robust healthcheck ([984a65c](https://github.com/pedrofariasx/qwenproxy/commit/984a65ca6737bab3647b0fc1206ad186767cc47c))
+
 # [1.19.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.18.1...v1.19.0) (2026-08-11)
 
 
