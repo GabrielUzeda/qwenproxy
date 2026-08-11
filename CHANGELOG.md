@@ -1,3 +1,10 @@
+# [1.18.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.17.1...v1.18.0) (2026-08-11)
+
+
+### Features
+
+* tool call robustness — malformed retry, id-to-name registry and log throttling ([a865ce6](https://github.com/pedrofariasx/qwenproxy/commit/a865ce685cf71633a14578457b15f238726c6dca))
+
 ## [1.17.1](https://github.com/pedrofariasx/qwenproxy/compare/v1.17.0...v1.17.1) (2026-08-11)
 
 
