@@ -48,7 +48,7 @@ export function SettingsPage() {
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Configuração essencial</CardTitle>
-          <CardDescription>Variáveis do `.env` — requerem restart para aplicar</CardDescription>
+          <CardDescription>Chaves destacadas em verde aplicam <b>na hora</b>; as demais exigem restart</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
@@ -57,9 +57,16 @@ export function SettingsPage() {
               const value = values[key] ?? ''
               return (
                 <div key={key} className="grid gap-2">
-                  <Label htmlFor={`cfg-${key}`} className="font-mono text-xs">
-                    {key}
-                  </Label>
+                  <div className="flex items-center justify-between gap-2">
+                    <Label htmlFor={`cfg-${key}`} className="font-mono text-xs">
+                      {key}
+                    </Label>
+                    {(data.liveKeys || []).includes(key) ? (
+                      <span className="rounded border border-emerald-400/40 px-1.5 py-0.5 text-[10px] text-emerald-400">instantâneo</span>
+                    ) : (
+                      <span className="rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground">restart</span>
+                    )}
+                  </div>
                   {type === 'bool' ? (
                     <div className="flex h-9 items-center gap-3 rounded-md border px-3">
                       <Switch id={`cfg-${key}`} checked={value === 'true'} onCheckedChange={(c) => setValue(key, c ? 'true' : 'false')} />
@@ -85,7 +92,13 @@ export function SettingsPage() {
                     if (v !== '') patch[key] = v
                   }
                   const res = await api.saveSettings(patch)
-                  toast.success(res.restartRequired ? 'Salvo. Reinicie o servidor para aplicar.' : 'Salvo')
+                  if (res.live?.length && !res.restartRequired) {
+                    toast.success('Aplicado instantaneamente (sem restart)')
+                  } else if (res.live?.length && res.restartRequired) {
+                    toast.success('Chaves instantâneas aplicadas. Demais exigem restart.')
+                  } else {
+                    toast.success('Salvo. Reinicie o servidor para aplicar.')
+                  }
                   load()
                 } catch (err: any) {
                   toast.error(err?.message || 'Falha ao salvar')

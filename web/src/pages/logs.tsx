@@ -9,10 +9,10 @@ import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 
 const LEVEL_STYLES: Record<LogEntry['level'], string> = {
-  error: 'bg-red-500/20 text-red-400 border-red-500/30',
-  warn: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
-  info: 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30',
-  debug: 'bg-zinc-500/20 text-zinc-400 border-zinc-500/30',
+  error: 'bg-red-500/15 text-red-600 border-red-500/30 dark:text-red-400',
+  warn: 'bg-amber-500/15 text-amber-600 border-amber-500/30 dark:text-amber-400',
+  info: 'bg-cyan-500/15 text-cyan-700 border-cyan-500/30 dark:text-cyan-400',
+  debug: 'bg-zinc-500/15 text-zinc-600 border-zinc-500/30 dark:text-zinc-400',
 }
 
 type LevelFilter = 'all' | LogEntry['level']

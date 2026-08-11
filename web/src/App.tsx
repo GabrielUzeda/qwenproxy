@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import {
   Activity, KeyRound, Layers, LogOut, Server, Settings, TerminalSquare,
-  ScrollText, Database, Box, Terminal, TrendingUp,
+  ScrollText, Database, Box, Terminal, TrendingUp, Waves,
   Sun, Moon, Menu, Search, RefreshCw, Snowflake, Download
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -12,6 +12,8 @@ import { Separator } from '@/components/ui/separator'
 import {
   CommandDialog, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem
 } from '@/components/ui/command'
+import { toast } from 'sonner'
+import { api } from '@/lib/api'
 import { Login } from '@/components/login'
 import { ErrorBoundary } from '@/components/error-boundary'
 import { OverviewPage } from '@/pages/overview'
@@ -24,11 +26,13 @@ import { SessionsPage } from '@/pages/sessions'
 import { ModelsPage } from '@/pages/models'
 import { PlaygroundPage } from '@/pages/playground'
 import { UsagePage } from '@/pages/usage'
+import { StreamsPage } from '@/pages/streams'
 
 const NAV = [
   { path: '/overview', label: 'Visão geral', icon: Activity },
   { path: '/accounts', label: 'Contas', icon: Server },
   { path: '/users', label: 'API Keys', icon: KeyRound },
+  { path: '/streams', label: 'Streams', icon: Waves },
   { path: '/settings', label: 'Configuração', icon: Settings },
   { path: '/metrics', label: 'Métricas', icon: TerminalSquare },
   { path: '/logs', label: 'Logs', icon: ScrollText },
@@ -39,9 +43,28 @@ const NAV = [
 ]
 
 const ACTIONS = [
-  { label: 'Reiniciar servidor', icon: RefreshCw, run: () => { fetch('/admin/api/restart', { method: 'POST' }) } },
-  { label: 'Limpar cooldowns', icon: Snowflake, run: () => { fetch('/admin/api/clear-cooldowns', { method: 'POST' }) } },
-  { label: 'Baixar métricas', icon: Download, run: () => { window.open('/admin/api/metrics/export', '_blank') } },
+  {
+    label: 'Reiniciar servidor', icon: RefreshCw,
+    run: () => { fetch('/admin/api/restart', { method: 'POST' }); toast.success('Reiniciando…') },
+  },
+  {
+    label: 'Limpar cooldowns', icon: Snowflake,
+    run: () => api.clearCooldowns().then((r) => toast.success(`Cooldowns limpos (${r.cleared})`)).catch((e) => toast.error(e?.message || 'Falha')),
+  },
+  {
+    label: 'Baixar métricas', icon: Download,
+    run: async () => {
+      try {
+        const text = await api.exportMetrics()
+        const a = document.createElement('a')
+        a.href = `data:text/plain;charset=utf-8,${encodeURIComponent(text)}`
+        a.download = 'qwenproxy-metrics.txt'
+        a.click()
+      } catch (e: any) {
+        toast.error(e?.message || 'Falha ao baixar')
+      }
+    },
+  },
 ]
 
 function Clock() {
@@ -74,15 +97,24 @@ export function App() {
 
   useEffect(() => {
     const stored = localStorage.getItem('qwenproxy-theme')
-    const isDark = stored === null ? true : stored === 'dark'
+    const isDark = stored !== null
+      ? stored === 'dark'
+      : !window.matchMedia('(prefers-color-scheme: light)').matches
     setDark(isDark)
     document.documentElement.classList.toggle('dark', isDark)
+    window.dispatchEvent(new Event('qwenproxy:themechange'))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  useEffect(() => {
-    document.documentElement.classList.toggle('dark', dark)
-    localStorage.setItem('qwenproxy-theme', dark ? 'dark' : 'light')
-  }, [dark])
+  const handleToggleTheme = () => {
+    setDark((v) => {
+      const next = !v
+      document.documentElement.classList.toggle('dark', next)
+      localStorage.setItem('qwenproxy-theme', next ? 'dark' : 'light')
+      window.dispatchEvent(new Event('qwenproxy:themechange'))
+      return next
+    })
+  }
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -131,7 +163,7 @@ export function App() {
 
       <aside
         className={cn(
-          'fixed inset-y-0 left-0 z-50 flex flex-col overflow-y-auto border-r bg-muted/20 transition-all duration-200',
+          'fixed inset-y-0 left-0 z-50 flex flex-col overflow-y-auto border-r border-sidebar-border bg-sidebar text-sidebar-foreground transition-all duration-200',
           !sidebarOpen && '-translate-x-full lg:translate-x-0',
           collapsed ? 'w-16' : 'w-60'
         )}
@@ -217,7 +249,7 @@ export function App() {
             <Button variant="ghost" size="icon" onClick={() => setCmdOpen(true)}>
               <Search className="size-4" />
             </Button>
-            <Button variant="ghost" size="icon" onClick={() => setDark((v) => !v)}>
+            <Button variant="ghost" size="icon" onClick={handleToggleTheme}>
               {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
             </Button>
             <Clock />
@@ -229,6 +261,7 @@ export function App() {
             <Route path="/overview" element={<ErrorBoundary><OverviewPage /></ErrorBoundary>} />
             <Route path="/accounts" element={<ErrorBoundary><AccountsPage /></ErrorBoundary>} />
             <Route path="/users" element={<ErrorBoundary><UsersPage /></ErrorBoundary>} />
+            <Route path="/streams" element={<ErrorBoundary><StreamsPage /></ErrorBoundary>} />
             <Route path="/settings" element={<ErrorBoundary><SettingsPage /></ErrorBoundary>} />
             <Route path="/metrics" element={<ErrorBoundary><MetricsPage /></ErrorBoundary>} />
             <Route path="/logs" element={<ErrorBoundary><LogsPage /></ErrorBoundary>} />

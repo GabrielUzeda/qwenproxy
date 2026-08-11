@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Users, BarChart3, Clock, AlertTriangle, TrendingUp } from 'lucide-react'
-import { api, type UsageData, type UsageUser } from '@/lib/api'
+import { api, type UsageData } from '@/lib/api'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'

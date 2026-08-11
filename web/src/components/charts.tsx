@@ -1,4 +1,4 @@
-import { useId } from 'react'
+import { useEffect, useId, useState } from 'react'
 import {
   Area,
   AreaChart,
@@ -20,9 +20,34 @@ export function fmtTime(t?: number): string {
   return d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
-// Dark-themed chart tooltip (payload/label come from recharts).
+/** Resolves a CSS variable to a concrete rgb() string for SVG attributes
+ * (Recharts renders stroke/fill as attributes, which cannot use var()). */
+export function themeColor(varName: string, fallback: string): string {
+  try {
+    const probe = document.createElement('span')
+    probe.style.color = `var(${varName})`
+    document.body.appendChild(probe)
+    const resolved = getComputedStyle(probe).color
+    probe.remove()
+    return resolved && resolved !== 'rgba(0, 0, 0, 0)' ? resolved : fallback
+  } catch {
+    return fallback
+  }
+}
+
+/** Re-renders chart SVGs when the theme changes (App dispatches the event). */
+function useThemeTick() {
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    const onChange = () => setTick((t) => t + 1)
+    window.addEventListener('qwenproxy:themechange', onChange)
+    return () => window.removeEventListener('qwenproxy:themechange', onChange)
+  }, [])
+}
+
+// Theme-aware chart tooltip (payload/label come from recharts).
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function DarkTooltip({ active, payload, label, unit }: any) {
+function ChartTooltip({ active, payload, label, unit }: any) {
   if (!active || !payload?.length) return null
   const value = payload[0].value
   return (
@@ -34,8 +59,6 @@ function DarkTooltip({ active, payload, label, unit }: any) {
     </div>
   )
 }
-
-const axisTick = { fontSize: 10, fill: '#8b95a5' }
 
 interface ChartCardProps {
   title: string
@@ -60,9 +83,13 @@ export function ChartCard({ title, icon: Icon, badge, children }: ChartCardProps
 }
 
 export function AreaTrend({ data, color = '#34d399', unit = '', height = 180 }: { data: { t: number; v: number }[]; color?: string; unit?: string; height?: number }) {
+  useThemeTick()
   const id = useId().replace(/[^a-zA-Z0-9]/g, '')
   const points = data.map((d) => ({ name: fmtTime(d.t), v: d.v }))
   const gradId = `grad-${id}`
+  const axisTick = { fontSize: 10, fill: themeColor('--muted-foreground', '#8b95a5') }
+  const gridStroke = themeColor('--border', '#ffffff12')
+  const cursorStroke = themeColor('--border', '#ffffff22')
   return (
     <ResponsiveContainer width="100%" height={height}>
       <AreaChart data={points} margin={{ top: 8, right: 8, left: -14, bottom: 0 }}>
@@ -72,10 +99,10 @@ export function AreaTrend({ data, color = '#34d399', unit = '', height = 180 }: 
             <stop offset="100%" stopColor={color} stopOpacity={0} />
           </linearGradient>
         </defs>
-        <CartesianGrid stroke="#ffffff12" strokeDasharray="3 3" vertical={false} />
+        <CartesianGrid stroke={gridStroke} strokeDasharray="3 3" vertical={false} />
         <XAxis dataKey="name" tick={axisTick} tickLine={false} axisLine={false} minTickGap={50} />
         <YAxis tick={axisTick} tickLine={false} axisLine={false} width={40} allowDecimals={false} />
-        <Tooltip content={<DarkTooltip unit={unit} />} cursor={{ stroke: '#ffffff22' }} />
+        <Tooltip content={<ChartTooltip unit={unit} />} cursor={{ stroke: cursorStroke }} />
         <Area type="monotone" dataKey="v" stroke={color} strokeWidth={2} fill={`url(#${gradId})`} dot={false} isAnimationActive={false} />
       </AreaChart>
     </ResponsiveContainer>
@@ -83,14 +110,18 @@ export function AreaTrend({ data, color = '#34d399', unit = '', height = 180 }: 
 }
 
 export function LineTrend({ data, color = '#f5b842', unit = '', height = 180 }: { data: { t: number; v: number }[]; color?: string; unit?: string; height?: number }) {
+  useThemeTick()
   const points = data.map((d) => ({ name: fmtTime(d.t), v: d.v }))
+  const axisTick = { fontSize: 10, fill: themeColor('--muted-foreground', '#8b95a5') }
+  const gridStroke = themeColor('--border', '#ffffff12')
+  const cursorStroke = themeColor('--border', '#27272a')
   return (
     <ResponsiveContainer width="100%" height={height}>
       <LineChart data={points} margin={{ top: 8, right: 8, left: -14, bottom: 0 }}>
-        <CartesianGrid stroke="#ffffff12" strokeDasharray="3 3" vertical={false} />
+        <CartesianGrid stroke={gridStroke} strokeDasharray="3 3" vertical={false} />
         <XAxis dataKey="name" tick={axisTick} tickLine={false} axisLine={false} minTickGap={50} />
         <YAxis tick={axisTick} tickLine={false} axisLine={false} width={40} allowDecimals={false} />
-        <Tooltip content={<DarkTooltip unit={unit} />} cursor={{ stroke: '#27272a' }} />
+        <Tooltip content={<ChartTooltip unit={unit} />} cursor={{ stroke: cursorStroke }} />
         <Line type="monotone" dataKey="v" stroke={color} strokeWidth={2} dot={false} activeDot={false} isAnimationActive={false} />
       </LineChart>
     </ResponsiveContainer>
@@ -98,14 +129,18 @@ export function LineTrend({ data, color = '#f5b842', unit = '', height = 180 }: 
 }
 
 export function BarTrend({ data, color = '#a78bfa', unit = '', height = 180 }: { data: { t: number; v: number }[]; color?: string; unit?: string; height?: number }) {
+  useThemeTick()
   const points = data.map((d) => ({ name: fmtTime(d.t), v: d.v }))
+  const axisTick = { fontSize: 10, fill: themeColor('--muted-foreground', '#8b95a5') }
+  const gridStroke = themeColor('--border', '#ffffff12')
+  const cursorFill = themeColor('--border', '#27272a22')
   return (
     <ResponsiveContainer width="100%" height={height}>
       <BarChart data={points} margin={{ top: 8, right: 8, left: -14, bottom: 0 }}>
-        <CartesianGrid stroke="#ffffff12" strokeDasharray="3 3" vertical={false} />
+        <CartesianGrid stroke={gridStroke} strokeDasharray="3 3" vertical={false} />
         <XAxis dataKey="name" tick={axisTick} tickLine={false} axisLine={false} minTickGap={50} />
         <YAxis tick={axisTick} tickLine={false} axisLine={false} width={40} allowDecimals={false} />
-        <Tooltip content={<DarkTooltip unit={unit} />} cursor={{ fill: '#27272a22' }} />
+        <Tooltip content={<ChartTooltip unit={unit} />} cursor={{ fill: cursorFill }} />
         <Bar dataKey="v" fill={color} radius={[3, 3, 0, 0]} isAnimationActive={false} />
       </BarChart>
     </ResponsiveContainer>

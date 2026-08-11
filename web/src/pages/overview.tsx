@@ -2,7 +2,7 @@ import { useMemo, useRef, useState } from 'react'
 import { Activity, AlertTriangle, ArrowDownRight, ArrowUpRight, BarChart3, Download, Gauge, Layers, MemoryStick, Server, Wifi, WifiOff } from 'lucide-react'
 import { fmtBytes, fmtSec } from '@/lib/api'
 import { useLiveOverview } from '@/hooks/use-live'
-import { AreaTrend, ChartCard, LineTrend, BarTrend } from '@/components/charts'
+import { AreaTrend, ChartCard, LineTrend, BarTrend, themeColor } from '@/components/charts'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 
@@ -92,16 +92,29 @@ export function OverviewPage() {
   const kpiRef = useRef<HTMLDivElement>(null)
   const [compareMode, setCompareMode] = useState(false)
 
+  // True 1-minute rolling rate: sum the last 12 samples (each is a 5s count).
+  // Not a ×12 extrapolation of a single 5s sample — otherwise 1 request in a
+  // window would misleadingly display as "12 req/min".
+  const rollingPerMin = (arr?: { t: number; v: number }[]) => {
+    if (!arr) return []
+    return arr.map((d, i) => ({
+      t: d.t,
+      v: Math.round(arr.slice(Math.max(0, i - 11), i + 1).reduce((a, b) => a + b.v, 0)),
+    }))
+  }
+
   const charts = useMemo(() => {
     if (!data?.series) return null
     return {
-      requests: (data.series.requests || []).map((d) => ({ t: d.t, v: Math.round(d.v * 12) })),
+      requests: rollingPerMin(data.series.requests),
+      completions: rollingPerMin(data.series.completions),
       errors: data.series.errors || [],
       latency: data.series.latency || [],
       streams: data.series.streams ?? [],
       memory: data.series.memory || [],
       sessions: data.series.sessions || [],
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data])
 
   const delta = (arr?: { t: number; v: number }[]): number | null => {
@@ -118,7 +131,7 @@ export function OverviewPage() {
   const handleExportPng = async () => {
     if (!kpiRef.current) return
     try {
-      const dataUrl = await toPng(kpiRef.current, { backgroundColor: '#09090b', pixelRatio: 2 })
+      const dataUrl = await toPng(kpiRef.current, { backgroundColor: themeColor('--background', '#09090b'), pixelRatio: 2 })
       const link = document.createElement('a')
       link.download = `overview-kpis-${Date.now()}.png`
       link.href = dataUrl
@@ -144,10 +157,10 @@ export function OverviewPage() {
         <div ref={kpiRef} className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
           <Kpi
             icon={Activity}
-            label="Requisições"
-            value={data?.requestsTotal.toLocaleString('pt-BR') ?? '…'}
-            suffix={charts ? `${charts.requests[charts.requests.length - 1]?.v ?? 0} req/min agora` : '…'}
-            delta={delta(charts?.requests)}
+            label="Completions"
+            value={data?.requestsCompletions.toLocaleString('pt-BR') ?? '…'}
+            suffix={charts ? `${charts.completions[charts.completions.length - 1]?.v ?? 0} req/min agora · ${data?.requestsTotal?.toLocaleString('pt-BR') ?? 0} total` : '…'}
+            delta={delta(charts?.completions)}
             deltaUp
           />
           <Kpi
@@ -155,20 +168,21 @@ export function OverviewPage() {
             label="Erros"
             value={data?.requestsErrors ?? '…'}
             tone={data && data.requestsErrors ? 'bad' : 'ok'}
-            suffix={data ? `${data.requestsSuccessRate.toFixed(1)}% sucesso · ${errorTimerText}` : ''}
+            suffix={data ? `${data.requestsSuccessRate.toFixed(1)}% sucesso · ${data.requests4xx ?? 0} 4xx · ${data.requests5xx ?? 0} 5xx · ${errorTimerText}` : ''}
             delta={delta(charts?.errors)}
           />
           <Kpi
             icon={Gauge}
-            label="Latência média"
-            value={data ? `${data.latency?.count ? Math.round(data.latency.sum / data.latency.count) : 0}ms` : '…'}
-            suffix={charts && `últ: ${charts.latency[charts.latency.length - 1]?.v ?? '—'}ms`}
+            label="Latência p/ resposta"
+            value={data ? `${data.latencyCompletion?.count ? Math.round(data.latencyCompletion.sum / data.latencyCompletion.count) : 0}ms` : '…'}
+            suffix={data && `avg req: ${data.latency?.count ? Math.round(data.latency.sum / data.latency.count) : 0}ms`}
             delta={delta(charts?.latency)}
           />
           <Kpi
             icon={Layers}
             label="Streams ativos"
-            value={data?.totalUserStreams ?? '…'}
+            value={data?.activeStreamsMetric ?? '…'}
+            suffix={data ? `${data.totalUserStreams ?? 0} em usuários` : ''}
             tone="ok"
             delta={delta(charts?.streams)}
             deltaUp
@@ -193,12 +207,15 @@ export function OverviewPage() {
 
       {charts ? (
         <Section icon={BarChart3} title="Tráfego e desempenho" description="evolução na última janela de 20 minutos">
-          <div className="grid gap-4 lg:grid-cols-2">
-            <ChartCard title="Requisições / min" icon={BarChart3} badge={<ConnBadge mode={mode} />}>
-              <BarTrend data={charts.requests} color="#34d399" unit="req/min" height={220} />
+          <div className="grid gap-4 lg:grid-cols-3">
+            <ChartCard title="Completions / min" icon={BarChart3} badge={<ConnBadge mode={mode} />}>
+              <BarTrend data={charts.completions} color="#34d399" unit="req/min" height={220} />
             </ChartCard>
-            <ChartCard title="Latência média" icon={Gauge} badge={data?.latency?.count ? <Badge variant="secondary" className="font-mono">{Math.round((data.latency?.sum ?? 0) / (data.latency?.count || 1))}ms</Badge> : undefined}>
+            <ChartCard title="Latência até início da resposta" icon={Gauge} badge={data?.latencyCompletion?.count ? <Badge variant="secondary" className="font-mono">{Math.round((data.latencyCompletion?.sum ?? 0) / (data.latencyCompletion?.count || 1))}ms</Badge> : undefined}>
               <LineTrend data={charts.latency} color="#f5b842" unit="ms" height={220} />
+            </ChartCard>
+            <ChartCard title="Requisições totais / min" icon={Activity} badge={charts.requests.length ? <Badge variant="secondary" className="font-mono">{charts.requests[charts.requests.length - 1].v} agora</Badge> : undefined}>
+              <BarTrend data={charts.requests} color="#5ee6d6" unit="req/min" height={220} />
             </ChartCard>
           </div>
           <div className="grid gap-4 md:grid-cols-3">
@@ -240,14 +257,16 @@ export function OverviewPage() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>E-mail</TableHead>
-                    <TableHead className="w-40">Carga</TableHead>
+                    <TableHead className="w-32">Carga / cap</TableHead>
+                    <TableHead className="w-24">Streams</TableHead>
+                    <TableHead className="w-20">Estado</TableHead>
                     <TableHead className="text-right">Cooldown</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {data && data.accounts.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={3} className="text-muted-foreground">
+                      <TableCell colSpan={5} className="text-muted-foreground">
                         Nenhuma conta configurada
                       </TableCell>
                     </TableRow>
@@ -261,7 +280,15 @@ export function OverviewPage() {
                           )}
                         </TableCell>
                         <TableCell>
-                          <LoadBar value={a.activeLoad} max={Math.max(1, (data?.lanes || 4))} />
+                          <LoadBar value={a.activeLoad} max={Math.max(1, data?.maxStreamsPerAccount || 2)} />
+                        </TableCell>
+                        <TableCell className="font-mono text-xs">{a.streams ?? 0}</TableCell>
+                        <TableCell>
+                          {a.ready ? (
+                            <Badge variant="outline" className="text-emerald-400">pronta</Badge>
+                          ) : (
+                            <Badge variant="outline" className="text-amber-400">aquecendo</Badge>
+                          )}
                         </TableCell>
                         <TableCell className="text-right">
                           {a.cooldown > 0 ? (
@@ -318,8 +345,28 @@ export function OverviewPage() {
                   <span className="font-mono">{data?.activeStreamsMetric ?? 0}</span>
                 </div>
                 <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Lanes prontas</span>
+                  <span className="font-mono">{data?.readyAccountCount ?? 0} / {data?.accounts.length ?? 0}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Cap streams / conta</span>
+                  <span className="font-mono">{data?.maxStreamsPerAccount ?? '—'}</span>
+                </div>
+                <div className="flex items-center justify-between">
                   <span className="text-muted-foreground">CPU load 1min</span>
                   <span className="font-mono">{data?.cpu?.load1m != null ? data.cpu.load1m.toFixed(2) : '—'}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Watchdog</span>
+                  {data?.watchdog?.overall === 0 ? (
+                    <Badge variant="outline" className="text-emerald-400">saudável</Badge>
+                  ) : data?.watchdog?.overall === 1 ? (
+                    <Badge variant="outline" className="text-amber-400">degradado</Badge>
+                  ) : data?.watchdog ? (
+                    <Badge variant="outline" className="text-red-400">crítico</Badge>
+                  ) : (
+                    <span className="font-mono">—</span>
+                  )}
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-muted-foreground">Limite por usuário</span>

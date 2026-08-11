@@ -12,12 +12,13 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 export function AccountsPage() {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [inUse, setInUse] = useState<string[]>([])
+  const [maxLoad, setMaxLoad] = useState(2)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
 
   function LoadBar({ value }: { value: number }) {
-    const pct = Math.min(100, value * 100)
+    const pct = Math.min(100, (value / Math.max(1, maxLoad)) * 100)
     const tone = pct >= 80 ? 'bg-red-500' : pct >= 50 ? 'bg-amber-400' : 'bg-emerald-400'
     return (
       <div className="ml-auto flex w-28 items-center gap-2">
@@ -34,6 +35,7 @@ export function AccountsPage() {
       const d = await api.accounts()
       setAccounts(d.accounts)
       setInUse(d.inUse)
+      if (d.maxStreamsPerAccount) setMaxLoad(d.maxStreamsPerAccount)
     } catch (err: any) {
       toast.error(err?.message || 'Falha ao carregar contas')
     }
@@ -82,6 +84,7 @@ export function AccountsPage() {
                 <TableHead>E-mail</TableHead>
                 <TableHead>ID</TableHead>
                 <TableHead className="text-right">Carga</TableHead>
+                <TableHead className="w-20">Streams</TableHead>
                 <TableHead>Cooldown</TableHead>
                 <TableHead>Em uso</TableHead>
                 <TableHead className="text-right">Ações</TableHead>
@@ -90,7 +93,7 @@ export function AccountsPage() {
             <TableBody>
               {accounts.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={6} className="text-muted-foreground">
+                  <TableCell colSpan={7} className="text-muted-foreground">
                     Nenhuma conta — adicione abaixo
                   </TableCell>
                 </TableRow>
@@ -102,6 +105,7 @@ export function AccountsPage() {
                     <TableCell className="text-right">
                       <LoadBar value={a.activeLoad} />
                     </TableCell>
+                    <TableCell className="font-mono text-xs">{a.streams ?? 0}</TableCell>
                     <TableCell>
                       {a.cooldown > 0 ? (
                         <Badge variant="outline" className="text-amber-400">
@@ -115,15 +119,14 @@ export function AccountsPage() {
                       )}
                     </TableCell>
                     <TableCell>
-                      {inUse.includes(a.id) ? (
-                        <Badge variant="outline" className="text-amber-400">
-                          em uso
+                      <div className="flex flex-col gap-1">
+                        <Badge variant="outline" className={inUse.includes(a.id) ? 'text-amber-400' : 'text-emerald-400'}>
+                          {inUse.includes(a.id) ? 'em uso' : 'livre'}
                         </Badge>
-                      ) : (
-                        <Badge variant="outline" className="text-emerald-400">
-                          livre
+                        <Badge variant="outline" className={a.ready ? 'text-emerald-400' : 'text-amber-400'}>
+                          {a.ready ? 'pronta' : 'aquecendo'}
                         </Badge>
-                      )}
+                      </div>
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-2">

@@ -30,6 +30,8 @@ export interface Account {
   cooldown: number
   cooldownReason: string | null
   activeLoad: number
+  ready?: boolean
+  streams?: number
 }
 
 export interface SeriesPoint {
@@ -40,9 +42,13 @@ export interface SeriesPoint {
 export interface Overview {
   uptime: number
   requestsTotal: number
+  requestsCompletions: number
   requestsErrors: number
+  requests4xx?: number
+  requests5xx?: number
   requestsSuccessRate: number
   latency?: { sum: number; count: number }
+  latencyCompletion?: { sum: number; count: number }
   memory: {
     rss: number
     heapUsed: number
@@ -59,9 +65,12 @@ export interface Overview {
   sessionCount: number
   activeStreamsMetric: number
   lanes: number
+  maxStreamsPerAccount?: number
+  readyAccountCount?: number
   series?: Record<string, SeriesPoint[]>
   userRateLimitRpm: number
   userMaxConcurrency: number
+  watchdog?: { overall: number; ram: number }
 }
 
 export interface AdminUser {
@@ -78,6 +87,8 @@ export interface SettingsData {
   types: Record<string, string>
   allowlist: string[]
   effective: Record<string, number | boolean>
+  liveKeys?: string[]
+  runtime?: Record<string, string>
 }
 
 export interface LogEntry {
@@ -97,6 +108,15 @@ export interface SessionInfo {
   historyComplete: boolean
   updatedAt: number
   ttlRemaining: number
+}
+
+export interface ActiveStream {
+  key: string
+  accountId: string
+  uiSessionId: string
+  targetResponseId: string
+  createdAt: number
+  ageMs: number
 }
 
 export interface ModelInfo {
@@ -135,7 +155,7 @@ export interface UsageData {
 
 export const api = {
   overview: () => request<Overview>('/overview'),
-  accounts: () => request<{ accounts: Account[]; inUse: string[] }>('/accounts'),
+  accounts: () => request<{ accounts: Account[]; inUse: string[]; maxStreamsPerAccount?: number }>('/accounts'),
   addAccount: (email: string, password: string) => request('/accounts', { method: 'POST', body: JSON.stringify({ email, password }) }),
   removeAccount: (id: string) => request(`/accounts/${id}`, { method: 'DELETE' }),
   clearCooldown: (id: string) => request(`/accounts/${id}/clear-cooldown`, { method: 'POST' }),
@@ -145,7 +165,7 @@ export const api = {
   updateUser: (id: string, u: Partial<{ email: string; apiKey: string; rateLimitRpm: number; maxConcurrency: number }>) => request(`/users/${id}`, { method: 'PUT', body: JSON.stringify(u) }),
   deleteUser: (id: string) => request(`/users/${id}`, { method: 'DELETE' }),
   settings: () => request<SettingsData>('/settings'),
-  saveSettings: (patch: Record<string, string>) => request<{ ok: boolean; restartRequired: boolean }>('/settings', { method: 'POST', body: JSON.stringify(patch) }),
+  saveSettings: (patch: Record<string, string>) => request<{ ok: boolean; applied: string[]; live: string[]; restartRequired: boolean }>('/settings', { method: 'POST', body: JSON.stringify(patch) }),
   metrics: async (): Promise<string> => {
     const res = await fetch('/admin/api/metrics')
     if (!res.ok) throw new ApiError(res.status, 'Falha ao buscar métricas')
@@ -156,12 +176,20 @@ export const api = {
   sessions: () => request<SessionInfo[]>('/sessions'),
   deleteSession: (key: string) => request(`/sessions/${key}`, { method: 'DELETE' }),
   clearSessions: () => request('/sessions/clear', { method: 'POST' }),
+  streams: () => request<{ streams: ActiveStream[] }>('/streams'),
+  stopStream: (key: string) => request<{ ok: boolean }>(`/streams/${encodeURIComponent(key)}/stop`, { method: 'POST' }),
+  clearCooldowns: () => request<{ ok: boolean; cleared: number }>('/clear-cooldowns', { method: 'POST' }),
+  exportMetrics: async (): Promise<string> => {
+    const res = await fetch('/admin/api/metrics/export')
+    if (!res.ok) throw new ApiError(res.status, 'Falha ao exportar métricas')
+    return res.text()
+  },
   models: () => request<ModelsData>('/models'),
   usage: (limit?: number) => request<UsageData>(`/usage${limit ? `?limit=${limit}` : ''}`),
   testChat: async (payload: { model: string; messages: Array<{ role: string; content: string }>; stream: boolean; thinking?: { type: string } }): Promise<Response> => {
     return fetch('/admin/api/test-chat', {
       method: 'POST',
-      headers: { 'ent-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     })
   },
