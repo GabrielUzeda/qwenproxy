@@ -10,6 +10,7 @@ import { registerStream, removeStream, getStream } from '../core/stream-registry
 import { metrics } from '../core/metrics.js'
 import { config } from '../core/config.js';
 import { getSession, resolveSessionKey } from '../services/session-manager.js';
+import { lookupToolCall } from '../core/tool-call-registry.js';
 import type { SessionEntry } from '../services/session-manager.js';
 import { fetchQwenChatHistory } from '../services/qwen.js';
 import {
@@ -180,6 +181,15 @@ export async function chatCompletions(c: Context) {
     const pendingMultimodal: Array<Array<{ type: string; text?: string; image_url?: { url: string }; video_url?: { url: string }; audio_url?: { url: string }; file_url?: { url: string } }>> = [];
 
     const toolCallIdToName = new Map<string, string>();
+    // Resolve the session's chat id early so the tool_response replay below can
+    // fall back to the emitted-tool registry when the client omits the original
+    // assistant tool_calls message from history.
+    const earlyRawSessionKey = (typeof (body as any).user === 'string' && (body as any).user.trim())
+      ? (body as any).user.trim()
+      : (c.req.header('x-qwen-session') || c.req.header('x-session-id') || undefined);
+    const sessionChatId = earlyRawSessionKey
+      ? getSession(resolveSessionKey(earlyRawSessionKey) ?? earlyRawSessionKey)?.chatId
+      : undefined;
     let lastUserContent = '';
     for (const msg of messages) {
       if (msg.role === 'assistant' && Array.isArray((msg as any).tool_calls)) {
@@ -233,7 +243,8 @@ export async function chatCompletions(c: Context) {
              const args = tc.function?.arguments;
              let parsedArgs: any = {};
              if (typeof args === 'string') {
-               try { parsedArgs = JSON.parse(args); } catch { parsedArgs = {}; }
+               try { parsedArgs = JSON.parse(args); }
+               catch { parsedArgs = args; } // keep the raw string: better than losing the tool call details
              } else if (args && typeof args === 'object') {
                parsedArgs = args;
              }
@@ -247,6 +258,10 @@ export async function chatCompletions(c: Context) {
         let toolName = msg.name;
         if (!toolName && msg.tool_call_id) {
           toolName = toolCallIdToName.get(msg.tool_call_id);
+          if (!toolName) {
+            const rec = sessionChatId ? lookupToolCall(sessionChatId, msg.tool_call_id) : undefined;
+            if (rec) toolName = rec.name;
+          }
         }
         promptParts.push(`Tool Response (${toolName || 'tool'}): ${contentStr || ''}\n`);
       }
@@ -618,6 +633,12 @@ export async function chatCompletions(c: Context) {
       onDegenerateRetry: async () => {
         console.warn('[Chat] Streaming degenerate reply detected. Regenerating on a clean chat...');
         const retried = await obtainStream(`${finalPrompt}\n${buildAnswerDirective()}`, true);
+        return { stream: retried.stream, uiSessionId: retried.uiSessionId };
+      },
+      onToolCallRetry: async () => {
+        console.warn('[Chat] Tool call attempted but unparseable. Regenerating with corrective directive...');
+        const corrected = `${finalPrompt}\nIMPORTANT: Your previous tool call was malformed and could not be parsed. If a tool is needed, emit ONE valid JSON object wrapped EXACTLY in <tool_call> and </tool_call> tags, nothing else.`;
+        const retried = await obtainStream(corrected, true);
         return { stream: retried.stream, uiSessionId: retried.uiSessionId };
       },
     });

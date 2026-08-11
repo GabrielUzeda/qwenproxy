@@ -7,6 +7,7 @@ import { looksLikeUnwrappedToolCall, parseUnwrappedToolCalls } from './tool-hand
 import { isDegenerateAnswer } from '../utils/degenerate-answer.js';
 import { removeStream } from '../core/stream-registry.js';
 import { recordToolCall } from '../core/tool-call-debug.js';
+import { recordToolCallEmission } from '../core/tool-call-registry.js';
 import { updateSessionParent, markHistoryComplete } from '../services/qwen.js';
 import { countTokens } from '../core/tokenizer.js';
 
@@ -28,6 +29,13 @@ export interface StreamHandlerContext {
    * discarded and the response is re-generated via this hook.
    */
   onDegenerateRetry?: () => Promise<{ stream: ReadableStream; uiSessionId: string } | null>;
+  /**
+   * Called once when the model SIGNALLED a tool call (opened a <tool_call> tag)
+   * but no parseable tool call was produced by the end of the stream. Lets the
+   * caller regenerate once with a corrective directive instead of silently
+   * dropping the tool call.
+   */
+  onToolCallRetry?: () => Promise<{ stream: ReadableStream; uiSessionId: string } | null>;
 }
 
 export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): any {
@@ -56,7 +64,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
     // the upstream stream ends. A degenerate final answer can then be discarded
     // and regenerated before the client ever sees it.
     const GUARD_HOLD_BYTES = 800;
-    let guardActive = !!ctx.onDegenerateRetry;
+    let guardActive = !!ctx.onDegenerateRetry || !!ctx.onToolCallRetry;
     let heldOutput = '';
 
     const releaseGuard = () => {
@@ -128,6 +136,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         const argsStr = typeof tc.arguments === 'string'
           ? tc.arguments
           : JSON.stringify(tc.arguments ?? {});
+        recordToolCallEmission(ctx.uiSessionId, tc.id, tc.name, argsStr);
         const toolCallChunk = `data: ${JSON.stringify({
           id: ctx.completionId,
           object: 'chat.completion.chunk',
@@ -200,6 +209,8 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       let targetResponseIdSet = false;
       let currentThoughtIndex = 0;
       let toolParser = ctx.hasTools ? new StreamingToolParser(ctx.tools) : null;
+      let sawToolCallSignal = false;
+      let toolCallRetried = false;
       let bufferChunks: string[] = [];
       let bufferLen = 0;
       let lineStart = 0;
@@ -215,6 +226,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         targetResponseIdSet = false;
         currentThoughtIndex = 0;
         toolParser = ctx.hasTools ? new StreamingToolParser(ctx.tools) : null;
+        sawToolCallSignal = false;
         bufferChunks = [];
         bufferLen = 0;
         lineStart = 0;
@@ -222,7 +234,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         promptTokens = estimatedPromptTokens;
         firstPayloadFlushed = false;
         heldOutput = '';
-        guardActive = !!ctx.onDegenerateRetry;
+        guardActive = !!ctx.onDegenerateRetry || !!ctx.onToolCallRetry;
       };
 
       const readUpstream = async (stream: ReadableStream) => {
@@ -334,6 +346,9 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
               } else {
                 if (ctx.hasTools && toolParser) {
                   const { text, toolCalls } = toolParser.feed(vStr);
+                  if (toolParser.isInsideTool() || vStr.toLowerCase().includes('<tool_call')) {
+                    sawToolCallSignal = true;
+                  }
                   if (text) {
                     if (looksLikeUnwrappedToolCall(text)) {
                       const unwrappedToolCalls = parseUnwrappedToolCalls(text);
@@ -364,6 +379,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       };
 
       await readUpstream(ctx.stream);
+      if (toolParser?.isInsideTool()) sawToolCallSignal = true;
 
       // Degenerate-answer guard: if the entire response is a terse
       // acknowledgment, discard the held bytes and regenerate once with a
@@ -380,6 +396,31 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
           ctx.uiSessionId = retried.uiSessionId;
           resetStreamState();
           await readUpstream(retried.stream);
+          if (toolParser?.isInsideTool()) sawToolCallSignal = true;
+        }
+      }
+
+      // Tool-call retry guard: the model opened a <tool_call> tag but produced
+      // no parseable tool call. Regenerate once with a corrective directive so
+      // the client gets a usable tool call (or a plain answer) instead of a
+      // silently dropped, malformed one.
+      if (
+        ctx.onToolCallRetry &&
+        ctx.hasTools &&
+        toolParser &&
+        !toolCallRetried &&
+        emittedStreamingToolIds.size === 0 &&
+        sawToolCallSignal &&
+        guardActive
+      ) {
+        console.warn('[Chat] Tool call attempted but unparseable. Regenerating with corrective directive...');
+        toolCallRetried = true;
+        const retried = await ctx.onToolCallRetry();
+        if (retried) {
+          ctx.uiSessionId = retried.uiSessionId;
+          resetStreamState();
+          await readUpstream(retried.stream);
+          if (toolParser?.isInsideTool()) sawToolCallSignal = true;
         }
       }
 
@@ -516,6 +557,7 @@ export async function collectNonStreamingResult(
     if (seenToolCallIds.has(tc.id)) return;
     seenToolCallIds.add(tc.id);
     const argsStr = typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments ?? {});
+    recordToolCallEmission(uiSessionId, tc.id, tc.name, argsStr);
     const entry = { id: tc.id, type: 'function', function: { name: tc.name, arguments: argsStr } };
     recordToolCall(completionId, 'non-streaming', JSON.stringify(entry));
     toolCallsOut.push(entry);
@@ -578,7 +620,7 @@ export async function collectNonStreamingResult(
     total_tokens: parserState.promptTokens + parserState.completionTokens,
     prompt_tokens_details: { cached_tokens: 0 }
   };
-  const message: any = { role: 'assistant', content: toolCallsOut.length ? null : finalContent };
+  const message: any = { role: 'assistant', content: toolCallsOut.length ? (finalContent || '') : finalContent };
   if (parserState.reasoningBuffer) message.reasoning_content = parserState.reasoningBuffer;
   if (toolCallsOut.length) toolCallsOut.forEach((tc, idx) => tc.index = idx);
   if (toolCallsOut.length) message.tool_calls = toolCallsOut;

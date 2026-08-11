@@ -8,8 +8,25 @@
 import crypto from 'crypto';
 import { robustParseJSON } from '../utils/json.js';
 import { logger } from '../core/logger.js';
+import { metrics } from '../core/metrics.js';
 import type { ParsedToolCall } from './types';
 import type { FunctionToolDefinition } from './types';
+
+// Throttled logging for noisy-but-benign conditions (model echoing source files
+// that contain <tool_call> literals, truncated blocks, etc.). Full log entries
+// are emitted at most once per WARN_INTERVAL per key, with a cumulative counter,
+// so a flood of malformed blocks does not spam the log.
+const warnState = new Map<string, { lastAt: number; count: number }>();
+const WARN_INTERVAL = 5000;
+function throttledWarn(key: string, buildMsg: (count: number) => void): void {
+  const state = warnState.get(key) || { lastAt: 0, count: 0 };
+  state.count++;
+  warnState.set(key, state);
+  if (state.count <= 3 || Date.now() - state.lastAt > WARN_INTERVAL) {
+    state.lastAt = Date.now();
+    buildMsg(state.count);
+  }
+}
 
 export interface ParserResult {
   text: string;
@@ -423,11 +440,12 @@ export class StreamingToolParser {
           result.toolCalls.push(recovered);
           this.emittedToolCallCount++;
         } else {
-          logger.warn('[parser] Dropping unrecoverable unclosed tool call at end of stream');
+          throttledWarn('unrecoverable', (n) =>
+            logger.warn(`[parser] Dropping unrecoverable unclosed tool call at end of stream (${n} total)`)
+          );
           result.text += this.pendingLeadIn;
           result.text += this.currentOpenTag + this.buffer + TOOL_END;
-        }
-      } else {
+        }      } else {
         result.text += this.pendingLeadIn;
       }
     } else {
@@ -453,7 +471,7 @@ export class StreamingToolParser {
   private processToolContent(content: string, result: ParserResult): void {
     let t = content.trim();
     if (!t) {
-      logger.warn('[parser] Dropping empty tool call block');
+      logger.debug('[parser] Dropping empty tool call block');
       if (this.emittedToolCallCount === 0 && this.pendingLeadIn.trim().length > 0) {
         result.text += this.pendingLeadIn;
       }
@@ -513,12 +531,15 @@ export class StreamingToolParser {
     }
 
     // 4) Tool call is malformed and unrecoverable.
-    logger.warn('[parser] Dropping malformed tool call block', { 
-      contentPreview: t.substring(0, 500), 
-      hasName: t.includes('"name"') || t.includes('"tool"') || t.includes('tool_name'),
-      hasArgs: t.includes('"arguments"') || t.includes('"args"') || t.includes('"parameters"') || t.includes('"input"'),
-      first100Chars: t.substring(0, 100)
-    });
+    metrics.increment('toolcalls.malformed');
+    throttledWarn('malformed', (n) =>
+      logger.warn(`[parser] Dropping malformed tool call block (${n} total)`, {
+        contentPreview: t.substring(0, 500),
+        hasName: t.includes('"name"') || t.includes('"tool"') || t.includes('tool_name'),
+        hasArgs: t.includes('"arguments"') || t.includes('"args"') || t.includes('"parameters"') || t.includes('"input"'),
+        first100Chars: t.substring(0, 100)
+      })
+    );
     result.text += this.pendingLeadIn;
     result.text += this.currentOpenTag + content + TOOL_END;
     this.pendingLeadIn = '';

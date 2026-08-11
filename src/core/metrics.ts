@@ -40,6 +40,7 @@ export class Metrics extends EventEmitter {
       ['streams.active', 'gauge', 'Active SSE streams'],
       ['streams.by.account', 'gauge', 'Active SSE streams per account'],
       ['streams.errors', 'counter', 'Stream errors'],
+      ['toolcalls.malformed', 'counter', 'Malformed tool call blocks dropped by the parser'],
       ['memory.heap.used', 'gauge', 'Heap memory used (bytes)'],
       ['memory.heap.total', 'gauge', 'Heap memory total (bytes)'],
       ['memory.rss', 'gauge', 'Resident set size (bytes) — real memory footprint'],
