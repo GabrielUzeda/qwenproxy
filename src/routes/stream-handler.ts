@@ -7,6 +7,7 @@ import { looksLikeUnwrappedToolCall, parseUnwrappedToolCalls } from './tool-hand
 import { isDegenerateAnswer } from '../utils/degenerate-answer.js';
 import { removeStream } from '../core/stream-registry.js';
 import { updateSessionParent, markHistoryComplete } from '../services/qwen.js';
+import { countTokens } from '../core/tokenizer.js';
 
 export interface StreamHandlerContext {
   stream: ReadableStream;
@@ -157,6 +158,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       };
 
       let firstPayloadFlushed = false;
+      const estimatedPromptTokens = countTokens(ctx.finalPrompt);
       const fastWriteContent = (content: string) => {
         bufferedWrite(contentPrefix + escapeJsonString(content) + chunkSuffix);
         if (!firstPayloadFlushed) { firstPayloadFlushed = true; flushWrites(); }
@@ -191,7 +193,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       let bufferLen = 0;
       let lineStart = 0;
       let completionTokens = 0;
-      let promptTokens = Math.ceil(ctx.finalPrompt.length / 3.5);
+      let promptTokens = estimatedPromptTokens;
 
       const resetStreamState = () => {
         _reasoningBuffer = '';
@@ -206,7 +208,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         bufferLen = 0;
         lineStart = 0;
         completionTokens = 0;
-        promptTokens = Math.ceil(ctx.finalPrompt.length / 3.5);
+        promptTokens = estimatedPromptTokens;
         firstPayloadFlushed = false;
         heldOutput = '';
         guardActive = !!ctx.onDegenerateRetry;

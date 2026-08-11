@@ -1,4 +1,4 @@
-import { getBasicHeaders, getPageForAccount } from './playwright.js';
+import { getBasicHeaders, waitForAccountPage } from './playwright.js';
 import { markAccountRateLimited } from '../core/account-manager.js';
 import { config } from '../core/config.js';
 import { QwenUpstreamError } from './error-handler.js';
@@ -99,7 +99,7 @@ async function createRealQwenChat(header: Record<string, string>, accountId?: st
     return process.env.TEST_SESSION_ID || `mock-chat-${crypto.randomUUID()}`;
   }
 
-  const page = getPageForAccount(accountId);
+  const page = await waitForAccountPage(accountId, 15000);
   const body = JSON.stringify({
     title: 'Nova Conversa',
     models: ['qwen3.7-plus'],
@@ -109,10 +109,7 @@ async function createRealQwenChat(header: Record<string, string>, accountId?: st
     project_id: '',
   });
 
-  const pageUrl = page?.url() || '';
-  const isOnQwenOrigin = pageUrl.includes('chat.qwen.ai');
-
-  if (page && !page.isClosed() && isOnQwenOrigin) {
+  if (page) {
     try {
       const result = await browserJsonFetch<any>(page, 'https://chat.qwen.ai/api/v2/chats/new', {
         method: 'POST',
@@ -158,7 +155,7 @@ async function createRealQwenChat(header: Record<string, string>, accountId?: st
 async function fetchUnusedChats(headers: Record<string, string>, accountId?: string): Promise<string[]> {
   if (process.env.TEST_MOCK_PLAYWRIGHT) return [];
 
-  const page = getPageForAccount(accountId);
+  const page = await waitForAccountPage(accountId, 10000);
   const url = 'https://chat.qwen.ai/api/v2/chats/?page=1&exclude_project=true';
   const reqHeaders: Record<string, string> = {
     'accept': 'application/json, text/plain, */*',
@@ -168,7 +165,7 @@ async function fetchUnusedChats(headers: Record<string, string>, accountId?: str
   };
 
   let body = '';
-  if (page && !page.isClosed() && page.url().includes('chat.qwen.ai')) {
+  if (page) {
     try {
       const result = await browserJsonFetch<any>(page, url, {
         method: 'GET',

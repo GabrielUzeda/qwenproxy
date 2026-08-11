@@ -131,7 +131,7 @@ export function App() {
 
       <aside
         className={cn(
-          'fixed inset-y-0 left-0 z-50 flex flex-col overflow-y-auto border-r bg-muted/20 transition-all duration-200 lg:static lg:z-auto',
+          'fixed inset-y-0 left-0 z-50 flex flex-col overflow-y-auto border-r bg-muted/20 transition-all duration-200',
           !sidebarOpen && '-translate-x-full lg:translate-x-0',
           collapsed ? 'w-16' : 'w-60'
         )}
@@ -190,7 +190,7 @@ export function App() {
         </div>
       </aside>
 
-      <main className="min-w-0 flex-1">
+      <main className={cn('min-w-0 flex-1', collapsed ? 'lg:pl-16' : 'lg:pl-60')}>
         <header className="sticky top-0 z-10 flex items-center justify-between border-b bg-background/90 px-6 py-3 backdrop-blur lg:px-8">
           <div className="flex items-center gap-3">
             <Button

@@ -58,6 +58,8 @@ const envSchema = z.object({
   SINGLE_ACCOUNT_ID: z.string().default(''),
   SINGLE_ACCOUNT_EMAIL: z.string().default(''),
   ACCOUNT_LANES: envInt(1, 1),
+  ACCOUNT_MAX_CONCURRENT_STREAMS: envInt(2, 1),
+  ACCOUNT_STREAM_SLOT_WAIT_MS: envInt(30000, 1000),
   LARGE_PROMPT_THRESHOLD: envInt(524288, 1),
   HYBRID_SESSIONS_ENABLED: envBool(true),
   HYBRID_SESSION_VERIFY: envBool(true),
@@ -150,6 +152,8 @@ export const config = {
     singleAccountId: env.SINGLE_ACCOUNT_ID,
     singleAccountEmail: env.SINGLE_ACCOUNT_EMAIL,
     lanes: env.ACCOUNT_LANES,
+    maxStreamsPerAccount: env.ACCOUNT_MAX_CONCURRENT_STREAMS,
+    streamSlotWaitMs: env.ACCOUNT_STREAM_SLOT_WAIT_MS,
   },
   precapture: {
     headersStartup: env.PRECAPTURE_HEADERS_STARTUP,

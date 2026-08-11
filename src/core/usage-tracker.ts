@@ -1,3 +1,5 @@
+import { countTokens } from './tokenizer.js'
+
 interface UserUsage {
   requestCount: number;
   errorCount: number;
@@ -8,8 +10,8 @@ interface UserUsage {
 const userUsageMap = new Map<string, UserUsage>();
 const modelUsageMap = new Map<string, number>();
 
-export function trackUsage(userId: string, promptChars: number, isError: boolean): void {
-  const estimatedTokens = Math.ceil(promptChars / 3.5);
+export function trackUsage(userId: string, inputText: string, isError: boolean): void {
+  const estimatedTokens = countTokens(inputText);
   const existing = userUsageMap.get(userId);
 
   if (existing) {

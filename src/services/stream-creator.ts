@@ -1,11 +1,11 @@
-import { getQwenHeaders, getBasicHeaders, getGuestHeaders, getPageForAccount, browserStreamFetch } from './playwright.js';
+import { getQwenHeaders, getBasicHeaders, getGuestHeaders, getPageForAccount, waitForAccountPage, browserStreamFetch } from './playwright.js';
 import { MAX_PAYLOAD_SIZE } from '../core/model-registry.js';
 import { config } from '../core/config.js';
 import { RetryableQwenStreamError, QwenUpstreamError, handleErrorBody, handleJsonErrorBody } from './error-handler.js';
 import { getWarmedChat, releaseWarmChat } from './warm-pool.js';
-import { getClientHintsHeaders, Mutex } from './browser-manager.js';
+import { getClientHintsHeaders } from './browser-manager.js';
 import type { Page } from 'playwright';
-import { releaseAccountInUse, markAccountStreamStart, markAccountStreamEnd } from '../core/account-manager.js';
+import { releaseAccountInUse, acquireAccountStreamSlot } from '../core/account-manager.js';
 import { BAXIA_IFRAME_SELECTOR, solveBaxiaCaptcha } from './captcha-solver.js';
 import { uploadLargePromptAsFile } from '../routes/upload.js';
 import { getSession, setSession, getSessionParent, updateSessionParent } from './session-manager.js';
@@ -222,20 +222,6 @@ let lastModelsFetch = 0;
 
 const nativeToolsDisabled = new Set<string>();
 const disablingNativeToolsInProgress = new Set<string>();
-const accountStreamMutexes = new Map<string, Mutex>();
-
-function getAccountStreamMutex(accountId: string): Mutex {
-  let mutex = accountStreamMutexes.get(accountId);
-  if (!mutex) {
-    mutex = new Mutex();
-    accountStreamMutexes.set(accountId, mutex);
-  }
-  return mutex;
-}
-
-function shouldSerializeAccountStreams(accountId: string): boolean {
-  return !accountId.includes('::lane-');
-}
 
 export async function disableNativeTools(accountId?: string): Promise<void> {
   const cacheKey = accountId || 'global';
@@ -603,9 +589,10 @@ export async function createQwenStream(
   let leasedChat: any;
   let leasedChatReleased = false;
   const streamLockKey = effectiveAccountId || 'global';
-  const releaseAccountStream = shouldSerializeAccountStreams(streamLockKey)
-    ? await getAccountStreamMutex(streamLockKey).acquire()
-    : null;
+  // Reserve a concurrency slot for the real account. All lanes share one
+  // budget, so requests queue here (up to the configured wait) instead of
+  // hammering the Qwen backend and tripping its per-account rate limits.
+  const releaseAccountStream = await acquireAccountStreamSlot(streamLockKey, config.accounts.streamSlotWaitMs);
   let accountStreamReleased = false;
 
   let sessionLocked = false;
@@ -616,22 +603,10 @@ export async function createQwenStream(
     usingPinnedChat = true;
   }
 
-  let streamLoadCounted = false;
-  const countStreamStarted = () => {
-    if (streamLoadCounted) return;
-    streamLoadCounted = true;
-    markAccountStreamStart(streamLockKey);
-  };
-  const countStreamEnded = () => {
-    if (!streamLoadCounted) return;
-    streamLoadCounted = false;
-    markAccountStreamEnd(streamLockKey);
-  };
-
   const releaseAccountStreamOnce = () => {
     if (accountStreamReleased) return;
     accountStreamReleased = true;
-    releaseAccountStream?.();
+    releaseAccountStream();
   };
 
   const releaseSessionBusy = () => {
@@ -652,10 +627,7 @@ export async function createQwenStream(
     releaseLeasedChat();
     releaseSessionBusy();
     releaseAccountStreamOnce();
-    countStreamEnded();
   };
-
-  countStreamStarted();
 
   const wrapLeasedStream = (
     stream: ReadableStream<Uint8Array>,
@@ -755,6 +727,10 @@ export async function createQwenStream(
       if (err.message?.includes('chat is in progress') || err.message?.includes('The chat is in progress')) {
         const retryAfterMs = 2000 + Math.floor(Math.random() * 2000);
         throw new RetryableQwenStreamError(`Qwen: ${err.message}`, retryAfterMs);
+      }
+      if (err.message?.includes('Warm pool empty after retry')) {
+        const retryAfterMs = 1500 + Math.floor(Math.random() * 1500);
+        throw new RetryableQwenStreamError(err.message, retryAfterMs);
       }
       throw err;
     }
@@ -938,8 +914,14 @@ export async function createQwenStream(
 
     const url = `https://chat.qwen.ai/api/v2/chat/completions?chat_id=${chatId}`;
 
-    const page = getPageForAccount(effectiveAccountId);
-    if (page && !page.isClosed() && page.url().includes('chat.qwen.ai')) {
+    // The lane's page can transiently be off-origin (mid-`goto`, blank while a
+    // background header capture is warming it). Instead of instantly refusing
+    // (which failed bursts of requests right after startup), wait for it to
+    // reach chat.qwen.ai and drive it back there if needed.
+    const page = process.env.TEST_MOCK_PLAYWRIGHT
+      ? getPageForAccount(effectiveAccountId)
+      : await waitForAccountPage(effectiveAccountId, 15000);
+    if (page) {
       const completionPage = page;
       try {
         const browserResult = await browserStreamFetch(completionPage, url, {
@@ -1035,7 +1017,7 @@ export async function createQwenStream(
           }
         }
 
-        throw new Error(`Browser stream fetch returned non-stream response without body: ${browserResult.status} ${browserResult.statusText}`);
+        throw new RetryableQwenStreamError(`Qwen browser stream returned empty non-stream ${browserResult.status} response for ${chatId}. The chat may still be processing the previous message.`, 2000 + Math.floor(Math.random() * 2000));
       } catch (browserErr: any) {
         if (browserErr instanceof QwenUpstreamError || browserErr instanceof RetryableQwenStreamError) throw browserErr;
         throw new Error(`Browser stream fetch failed with active Qwen page: ${browserErr.message}`, { cause: browserErr });

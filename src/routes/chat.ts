@@ -147,7 +147,7 @@ export async function chatCompletions(c: Context) {
     userSlotReleased = true;
     releaseUserSlot(user.id);
   };
-  let usageInputChars = 0;
+  let usageInputText = '';
   let usageModel = '';
 
   try {
@@ -293,11 +293,11 @@ export async function chatCompletions(c: Context) {
     }
 
     const modelId = body.model.replace('-no-thinking', '').replace('-thinking', '');
-    const inputChars = (systemPrompt + prompt).length;
-    usageInputChars = inputChars;
+    const inputText = systemPrompt + prompt;
+    usageInputText = inputText;
     usageModel = modelId;
     const modelContextWindow = getModelContextWindow(modelId)
-    const estimatedTokens = estimateTokenCount(systemPrompt + prompt, modelId);
+    const estimatedTokens = estimateTokenCount(inputText, modelId);
     const forcedToolName = getForcedToolName(bodyAny.tool_choice);
     const parallelToolCalls = bodyAny.parallel_tool_calls !== false && toolChoiceMode !== 'forced';
     const toolContextText = `${systemPrompt}\n${prompt}`;
@@ -592,13 +592,13 @@ export async function chatCompletions(c: Context) {
         completed = await collectResponse(retried.stream, retried.uiSessionId);
       }
 
-      trackUsage(user ? user.id : 'anonymous', inputChars, completed.status !== 200);
+      trackUsage(user ? user.id : 'anonymous', inputText, completed.status !== 200);
       trackModelUsage(modelId);
       releaseUserSlotOnce();
       return c.json(completed.body, completed.status as any);
     }
 
-    trackUsage(user ? user.id : 'anonymous', inputChars, false);
+    trackUsage(user ? user.id : 'anonymous', inputText, false);
     trackModelUsage(modelId);
     return handleStreamingResponse(c, {
       stream: acquired.stream,
@@ -623,7 +623,7 @@ export async function chatCompletions(c: Context) {
     if (status >= 500) {
       metrics.increment('requests.errors')
     }
-    trackUsage(user ? user.id : 'anonymous', usageInputChars, true);
+    trackUsage(user ? user.id : 'anonymous', usageInputText, true);
     trackModelUsage(usageModel);
     return c.json({ error: { message: err.message } }, status)
   }

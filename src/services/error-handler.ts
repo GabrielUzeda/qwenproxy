@@ -21,6 +21,10 @@ export class QwenUpstreamError extends Error {
 export function handleErrorBody(peekText: string, status: number): never {
   try {
     const errorJson = JSON.parse(peekText);
+    if (errorJson?.data?.details?.includes('chat is in progress') || errorJson?.data?.details?.includes('The chat is in progress')) {
+      const retryAfterMs = 2000 + Math.floor(Math.random() * 2000);
+      throw new RetryableQwenStreamError(`Qwen: ${errorJson.data.details}`, retryAfterMs);
+    }
     if (errorJson && (errorJson.success === false || errorJson.error)) {
       const code = errorJson.data?.code || errorJson.code || 'UpstreamError';
       const details = errorJson.data?.details || errorJson.message || errorJson.error?.message || 'Qwen returned an error';
@@ -30,7 +34,7 @@ export function handleErrorBody(peekText: string, status: number): never {
       throw new QwenUpstreamError(`Qwen upstream error: ${code}: ${details}.${wait}`, code, errStatus);
     }
   } catch (e) {
-    if (e instanceof QwenUpstreamError) throw e;
+    if (e instanceof QwenUpstreamError || e instanceof RetryableQwenStreamError) throw e;
   }
   throw new Error(`Qwen returned status ${status}: ${peekText.slice(0, 500)}`);
 }

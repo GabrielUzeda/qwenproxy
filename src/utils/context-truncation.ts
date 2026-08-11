@@ -1,4 +1,5 @@
 import { getModelTokenDivisor } from '../core/model-registry.js'
+import { countTokens } from '../core/tokenizer.js'
 
 export interface TruncatedMessage {
   role: string
@@ -10,7 +11,7 @@ export interface TruncatedMessage {
 
 export function estimateTokenCount(text: string, modelId?: string): number {
   const divisor = getModelTokenDivisor(modelId)
-  return Math.ceil(text.length / divisor)
+  return countTokens(text, divisor)
 }
 
 function truncateSemantically(content: string, maxChars: number): string {

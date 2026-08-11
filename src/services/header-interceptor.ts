@@ -1,5 +1,5 @@
 import { config } from '../core/config.js';
-import { getActiveAccountCount } from '../core/account-manager.js';
+import { getActiveAccountCount, markAccountReady } from '../core/account-manager.js';
 import { getBaseAccountId } from '../core/account-lanes.js';
 import {
   CHROME_UA,
@@ -83,6 +83,7 @@ export async function getBasicHeaders(accountId?: string): Promise<{ cookie: str
       const result = await getQwenHeaders(true, accountId);
       bxUa = result.headers['bx-ua'];
       bxUmidtoken = result.headers['bx-umidtoken'];
+      markAccountReady(cacheKey);
       return {
         cookie: await getCookies(accountId),
         userAgent,
@@ -93,6 +94,10 @@ export async function getBasicHeaders(accountId?: string): Promise<{ cookie: str
     } catch (err: any) {
       console.warn(`[Playwright] Failed to auto-recover headers for ${cacheKey}: ${err.message}`);
     }
+  }
+
+  if (bxUa && bxUmidtoken) {
+    markAccountReady(cacheKey);
   }
 
   return { cookie, userAgent, bxV, bxUa, bxUmidtoken };
@@ -338,9 +343,14 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
 
   const currentUrl = page.url();
   const isOnQwen = currentUrl.includes('chat.qwen.ai');
-  const _isOnSpecificChat = isOnQwen && /\/c\//.test(currentUrl);
+  // Capturing headers on a specific chat page is fragile: if that chat is mid
+  // generation the send button is disabled, and repeating the same prompt can
+  // be deduplicated — so the completions request never fires and the head
+  // timeout kicks in (which then resets the profile). Always capture from a
+  // fresh new-chat page.
+  const isOnSpecificChat = isOnQwen && /\/c\/(?!new-chat)/.test(currentUrl);
 
-  if (!isOnQwen) {
+  if (!isOnQwen || isOnSpecificChat) {
     console.log(`[Playwright] Navigating to stable Qwen new-chat page for ${cacheKey}... (Current: ${currentUrl})`);
     await page.goto('https://chat.qwen.ai/c/new-chat', { waitUntil: 'domcontentloaded' });
   }
@@ -460,6 +470,7 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
         cache.cachedQwenHeaders = { headers: extractedHeaders, chatSessionId: uiSessionId, parentMessageId: uiParentMessageId };
         cache.lastHeadersTime = Date.now();
         cache.refreshInProgress = false;
+        markAccountReady(cacheKey);
 
         import('./qwen.js').then(m => m.disableNativeTools(accountId).catch(() => {}));
 

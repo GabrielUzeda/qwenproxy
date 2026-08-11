@@ -8,6 +8,88 @@ import { syncModelContextWindows } from '../core/model-registry.js'
 
 const app = new Hono()
 
+function buildCatalog(rawModels: any[]): any[] {
+  const capabilitiesOf = (model: any): string[] | undefined => {
+    const caps = model?.info?.meta?.capabilities
+    return Array.isArray(caps) ? caps.filter((c: any) => typeof c === 'string') : undefined
+  }
+  const entry = (model: any, id: string, name?: string) => ({
+    id,
+    name,
+    object: 'model',
+    owned_by: model.owned_by,
+    created: model.info?.created_at || Date.now(),
+    context_window: model.info?.meta?.max_context_length,
+    capabilities: capabilitiesOf(model),
+  })
+  return [
+    ...rawModels.map((model: any) => entry(model, model.id, model.name)),
+    ...rawModels.map((model: any) => entry(model, `${model.id}-thinking`, model.name ? `${model.name} (Thinking)` : undefined)),
+    ...rawModels.map((model: any) => entry(model, `${model.id}-no-thinking`, model.name ? `${model.name} (No Thinking)` : undefined)),
+  ]
+}
+
+/**
+ * Fetches the full Qwen model catalog (base + thinking + no-thinking variants)
+ * with a dedicated admin-side cache, so the admin dashboard can show every
+ * available model without coupling to the public /v1/models cache keys.
+ */
+export async function fetchFullModelCatalog(): Promise<any[]> {
+  const cacheKey = 'models:full-catalog'
+  const cached = await cache.get<any>(cacheKey)
+  if (cached?.data) return cached.data
+
+  let accountId: string | undefined
+  try {
+    const accounts = loadAccounts()
+    const account = accounts.find(a => !getAccountCooldownInfo(a.id))
+    if (account) {
+      accountId = account.id
+    }
+  } catch (e) {
+    console.warn('Failed to retrieve account for model catalog:', e)
+  }
+
+  const { cookie, userAgent, bxV } = await getBasicHeaders(accountId)
+  const response = await fetch(`${config.qwen.baseUrl}/api/models`, {
+    headers: {
+      'Accept': 'application/json, text/plain, */*',
+      'Accept-Language': 'pt-BR,pt;q=0.9',
+      'Connection': 'keep-alive',
+      'Referer': `${config.qwen.baseUrl}/c/demo`,
+      'Sec-Fetch-Dest': 'empty',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Site': 'same-origin',
+      'User-Agent': userAgent,
+      'X-Request-Id': crypto.randomUUID(),
+      'source': 'web',
+      'bx-v': bxV,
+      'sec-ch-ua': '"Chromium";v="137", "Google Chrome";v="137", "Not/A)Brand";v="99"',
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': '"Windows"',
+      'Timezone': new Date().toString(),
+      'Cookie': cookie,
+    },
+  })
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch models: ${response.status}`)
+  }
+
+  const data = await response.json()
+  const models = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : []
+
+  const formatted = {
+    object: 'list',
+    data: buildCatalog(models),
+  }
+
+  syncModelContextWindows(formatted.data)
+  await cache.set(cacheKey, formatted, 300)
+
+  return formatted.data
+}
+
 app.get('/v1/models', async (c) => {
   try {
     let accountId: string | undefined
@@ -59,35 +141,7 @@ app.get('/v1/models', async (c) => {
     
     const formatted = {
       object: 'list',
-      data: [
-        ...models.map((model: any) => ({
-          id: model.id,
-          name: model.name,
-          object: 'model',
-          owned_by: model.owned_by,
-          created: model.info?.created_at || Date.now(),
-          context_window: model.info?.meta?.max_context_length,
-          capabilities: model.info?.meta?.capabilities,
-        })),
-        ...models.map((model: any) => ({
-          id: `${model.id}-thinking`,
-          name: `${model.name} (Thinking)`,
-          object: 'model',
-          owned_by: model.owned_by,
-          created: model.info?.created_at || Date.now(),
-          context_window: model.info?.meta?.max_context_length,
-          capabilities: model.info?.meta?.capabilities,
-        })),
-        ...models.map((model: any) => ({
-          id: `${model.id}-no-thinking`,
-          name: `${model.name} (No Thinking)`,
-          object: 'model',
-          owned_by: model.owned_by,
-          created: model.info?.created_at || Date.now(),
-          context_window: model.info?.meta?.max_context_length,
-          capabilities: model.info?.meta?.capabilities,
-        })),
-      ],
+      data: buildCatalog(models),
     }
 
     syncModelContextWindows(formatted.data)
@@ -151,35 +205,7 @@ app.get('/v1/models/:model', async (c) => {
       
       const formatted = {
         object: 'list',
-        data: [
-          ...rawModels.map((model: any) => ({
-            id: model.id,
-            name: model.name,
-            object: 'model',
-            owned_by: model.owned_by,
-            created: model.info?.created_at || Date.now(),
-            context_window: model.info?.meta?.max_context_length,
-            capabilities: model.info?.meta?.capabilities,
-          })),
-          ...rawModels.map((model: any) => ({
-            id: `${model.id}-thinking`,
-            name: `${model.name} (Thinking)`,
-            object: 'model',
-            owned_by: model.owned_by,
-            created: model.info?.created_at || Date.now(),
-            context_window: model.info?.meta?.max_context_length,
-            capabilities: model.info?.meta?.capabilities,
-          })),
-          ...rawModels.map((model: any) => ({
-            id: `${model.id}-no-thinking`,
-            name: `${model.name} (No Thinking)`,
-            object: 'model',
-            owned_by: model.owned_by,
-            created: model.info?.created_at || Date.now(),
-            context_window: model.info?.meta?.max_context_length,
-            capabilities: model.info?.meta?.capabilities,
-          })),
-        ],
+        data: buildCatalog(rawModels),
       }
 
       syncModelContextWindows(formatted.data)

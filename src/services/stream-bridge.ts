@@ -194,8 +194,9 @@ export async function browserStreamFetch(
               headers: respHeaders,
             });
 
-            if (!resp.ok || !resp.body) {
-              const bodyText = await resp.text();
+            const responseContentType = resp.headers.get('content-type') || '';
+            if (!resp.ok || !resp.body || !responseContentType.includes('text/event-stream')) {
+              const bodyText = await resp.text().catch(() => '');
               (window as any).__streamRelay(reqId, 'body', bodyText);
               delete (window as any).__abortControllers[reqId];
               return;

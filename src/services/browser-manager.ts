@@ -6,6 +6,7 @@ import crypto from 'crypto';
 import type { QwenAccount } from '../core/accounts.js';
 import { config } from '../core/config.js';
 import { getBaseAccountId } from '../core/account-lanes.js';
+import { markAccountNotReady } from '../core/account-manager.js';
 import { getStealthScript } from './stealth.js';
 import { getFingerprintProfile, type FingerprintProfile } from './fingerprint.js';
 import { sleep } from '../utils/sleep.js';
@@ -272,6 +273,9 @@ export async function getOrLaunchBrowser(browserType: BrowserType = 'chromium'):
     activePage = null;
     guestContext = null;
     guestPage = null;
+    for (const id of [...accountPages.keys(), '_default', 'guest']) {
+      markAccountNotReady(id);
+    }
   });
   return browser;
 }
@@ -474,21 +478,19 @@ export async function resetBrowserProfile(cacheKey: string, accountId?: string):
       activePage = null;
     }
 
-    if (browser?.isConnected()) {
-      await browser.close();
-      browser = null;
-    }
-
+    // IMPORTANT: the shared browser and the OTHER accounts' contexts/pages must
+    // stay alive. This reset targets a single account (or the default/guest
+    // context) — closing the whole browser here kills every in-flight stream on
+    // every other account and forces a full cold restart, which is what this
+    // recovery path is trying to avoid.
     accountHeaderCaches.delete(cacheKey);
     cookieCaches.delete(cacheKey);
     cachedUserAgents.delete(cacheKey);
-    accountContexts.clear();
-    accountPages.clear();
-    context = null;
-    activePage = null;
-    guestContext = null;
-    guestPage = null;
-    guestHeadersCache = null;
+    if (accountId === 'guest') {
+      guestHeadersCache = null;
+    }
+    markAccountNotReady(accountId || cacheKey);
+    markAccountNotReady(profileId);
     fs.rmSync(profilePath, { recursive: true, force: true });
     fs.rmSync(storageStatePath(profileId), { force: true });
 
@@ -668,10 +670,44 @@ export async function closePlaywrightForAccount(accountId: string) {
   accountHeaderCaches.delete(accountId);
   cookieCaches.delete(accountId);
   cachedUserAgents.delete(accountId);
+  markAccountNotReady(accountId);
 }
 
 export function getPageForAccount(accountId?: string): Page | null {
   if (accountId === 'guest') return guestPage;
   if (accountId) return accountPages.get(accountId) || null;
   return activePage;
+}
+
+/**
+ * Returns the account's page once it is actually on the chat.qwen.ai origin.
+ * A lane's page can transiently sit off-origin (mid-`goto`, `about:blank` while
+ * header interception is warming it, etc.); routing a chat request at that
+ * moment makes `createQwenStream` refuse with "Cannot fetch Qwen completion
+ * outside an active Qwen browser page". Wait briefly and — if possible — drive
+ * the existing page back to a stable Qwen page instead of failing immediately.
+ */
+export async function waitForAccountPage(accountId?: string, timeoutMs = 15000): Promise<Page | null> {
+  const deadline = Date.now() + timeoutMs;
+  let attemptedNavigation = false;
+
+  for (;;) {
+    const page = accountId === 'guest' ? guestPage : accountId ? accountPages.get(accountId) : activePage;
+    if (page && !page.isClosed()) {
+      if (page.url().includes('chat.qwen.ai')) {
+        return page;
+      }
+      if (!attemptedNavigation) {
+        attemptedNavigation = true;
+        page.goto('https://chat.qwen.ai/c/new-chat', {
+          waitUntil: 'domcontentloaded',
+          timeout: Math.min(15000, config.timeouts.navigation),
+        }).catch(() => { /* ignore navigation errors; polling continues */ });
+      }
+    }
+    if (Date.now() >= deadline) {
+      return null;
+    }
+    await sleep(250);
+  }
 }

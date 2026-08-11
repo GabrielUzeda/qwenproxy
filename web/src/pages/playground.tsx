@@ -1,15 +1,29 @@
-import { useRef, useState } from 'react'
-import { Copy, MessageSquare, Send, Square, Trash2 } from 'lucide-react'
-import { api } from '@/lib/api'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Copy, MessageSquare, Send, Square, Terminal, Trash2 } from 'lucide-react'
+import { api, type CatalogModel } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from '@/components/ui/select'
+
+function fmtContext(n?: number): string {
+  if (!n) return ''
+  if (n >= 1000000) return `${n / 1000000}M`
+  if (n >= 1000) return `${Math.round(n / 1000)}K`
+  return String(n)
+}
+
+function variantOf(id: string): 'base' | 'thinking' | 'no-thinking' {
+  if (id.endsWith('-thinking')) return 'thinking'
+  if (id.endsWith('-no-thinking')) return 'no-thinking'
+  return 'base'
+}
 
 export function PlaygroundPage() {
-  const [model, setModel] = useState('qwen-plus')
+  const [catalog, setCatalog] = useState<CatalogModel[]>([])
+  const [model, setModel] = useState('')
   const [systemPrompt, setSystemPrompt] = useState('')
   const [userMessage, setUserMessage] = useState('')
   const [stream, setStream] = useState(true)
@@ -17,7 +31,44 @@ export function PlaygroundPage() {
   const [loading, setLoading] = useState(false)
   const [response, setResponse] = useState('')
   const [thinkingContent, setThinkingContent] = useState('')
+  const [durationMs, setDurationMs] = useState<number | null>(null)
   const abortRef = useRef<AbortController | null>(null)
+  const lastPayloadRef = useRef<string>('')
+
+  useEffect(() => {
+    let cancelled = false
+    api
+      .models()
+      .then((res) => {
+        if (cancelled) return
+        const list = res.catalog?.length ? res.catalog : res.models.map((m) => ({ ...m, requestCount: m.requestCount }))
+        setCatalog(list)
+        setModel((current) => {
+          if (current && list.some((m) => m.id === current)) return current
+          const preferred = [...list].sort((a, b) => b.requestCount - a.requestCount).find((m) => m.id === 'qwen-plus')
+          return (preferred ?? [...list].find((m) => variantOf(m.id) === 'base') ?? list[0])?.id ?? 'qwen-plus'
+        })
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const selectedModel = useMemo(() => catalog.find((m) => m.id === model), [catalog, model])
+  const topModels = useMemo(
+    () => catalog.filter((m) => m.requestCount > 0).sort((a, b) => b.requestCount - a.requestCount).slice(0, 5),
+    [catalog]
+  )
+
+  const buildPayload = useCallback(() => {
+    const messages: Array<{ role: string; content: string }> = []
+    if (systemPrompt.trim()) messages.push({ role: 'system', content: systemPrompt.trim() })
+    messages.push({ role: 'user', content: userMessage.trim() })
+    const payload: Parameters<typeof api.testChat>[0] = { model, messages, stream }
+    if (thinking) payload.thinking = { type: 'enabled' }
+    return payload
+  }, [model, systemPrompt, userMessage, stream, thinking])
 
   async function handleSend() {
     if (!userMessage.trim()) return
@@ -25,21 +76,10 @@ export function PlaygroundPage() {
     setLoading(true)
     setResponse('')
     setThinkingContent('')
-
-    const messages: Array<{ role: string; content: string }> = []
-    if (systemPrompt.trim()) {
-      messages.push({ role: 'system', content: systemPrompt.trim() })
-    }
-    messages.push({ role: 'user', content: userMessage.trim() })
-
-    const payload: Parameters<typeof api.testChat>[0] = {
-      model,
-      messages,
-      stream,
-    }
-    if (thinking) {
-      payload.thinking = { type: 'enabled' }
-    }
+    setDurationMs(null)
+    const startedAt = performance.now()
+    const payload = buildPayload()
+    lastPayloadRef.current = JSON.stringify(payload, null, 2)
 
     const controller = new AbortController()
     abortRef.current = controller
@@ -80,12 +120,8 @@ export function PlaygroundPage() {
               try {
                 const json = JSON.parse(data)
                 const delta = json.choices?.[0]?.delta
-                if (delta?.content) {
-                  setResponse((prev) => prev + delta.content)
-                }
-                if (delta?.reasoning_content) {
-                  setThinkingContent((prev) => prev + delta.reasoning_content)
-                }
+                if (delta?.content) setResponse((prev) => prev + delta.content)
+                if (delta?.reasoning_content) setThinkingContent((prev) => prev + delta.reasoning_content)
               } catch {
                 /* skip malformed chunks */
               }
@@ -95,12 +131,8 @@ export function PlaygroundPage() {
       } else {
         const json = await res.json()
         const message = json.choices?.[0]?.message
-        if (message?.content) {
-          setResponse(message.content)
-        }
-        if (message?.reasoning_content) {
-          setThinkingContent(message.reasoning_content)
-        }
+        if (message?.content) setResponse(message.content)
+        if (message?.reasoning_content) setThinkingContent(message.reasoning_content)
       }
     } catch (err: any) {
       if (err.name !== 'AbortError') {
@@ -109,6 +141,7 @@ export function PlaygroundPage() {
     } finally {
       setLoading(false)
       abortRef.current = null
+      setDurationMs(Math.round(performance.now() - startedAt))
     }
   }
 
@@ -117,9 +150,11 @@ export function PlaygroundPage() {
   }
 
   function handleClear() {
+    abortRef.current?.abort()
     setResponse('')
     setThinkingContent('')
     setUserMessage('')
+    setDurationMs(null)
   }
 
   async function handleCopy() {
@@ -128,65 +163,111 @@ export function PlaygroundPage() {
     }
   }
 
+  async function handleCopyCurl() {
+    try {
+      const payload = JSON.parse(lastPayloadRef.current || '{}')
+      const curl = [
+        'curl -N http://localhost:3000/v1/chat/completions \\',
+        '  -H "Content-Type: application/json" \\',
+        '  -H "Authorization: Bearer SUA_API_KEY" \\',
+        `  -d '${JSON.stringify({ ...payload, stream: payload.stream ?? true })}'`,
+      ].join('\n')
+      await navigator.clipboard.writeText(curl)
+    } catch {
+      /* nothing to copy */
+    }
+  }
+
+  const hasResponse = !!(response || thinkingContent)
+
   return (
     <div className="flex flex-col gap-6">
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base flex items-center gap-2">
-            <MessageSquare className="size-4" />
-            API Playground
-          </CardTitle>
-          <CardDescription>Test the /v1/chat/completions endpoint</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="grid gap-4">
+      <div className="grid gap-6 lg:grid-cols-2">
+        <Card className="lg:self-start">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <MessageSquare className="size-4" />
+              Requisição
+            </CardTitle>
+            <CardDescription>Teste o endpoint /v1/chat/completions</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-4">
             <div className="grid gap-2">
-              <Label htmlFor="model">Model</Label>
-              <Input
-                id="model"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder="qwen-plus"
-              />
+              <Label>Modelo</Label>
+              <Select value={model || undefined} onValueChange={setModel}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="Selecione um modelo…" />
+                </SelectTrigger>
+                <SelectContent>
+                  {topModels.length > 0 && (
+                    <SelectGroup>
+                      <SelectLabel>Mais usados</SelectLabel>
+                      {topModels.map((m) => (
+                        <SelectItem key={m.id} value={m.id}>
+                          <span className="font-mono">{m.id}</span>
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  )}
+                  <SelectGroup>
+                    <SelectLabel>Todos os modelos</SelectLabel>
+                    {catalog.map((m) => (
+                      <SelectItem key={m.id} value={m.id}>
+                        <span className="font-mono">{m.id}</span>
+                      </SelectItem>
+                    ))}
+                    {catalog.length === 0 && <SelectItem value="qwen-plus">qwen-plus</SelectItem>}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+              {selectedModel ? (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Badge variant="outline" className="font-normal">ctx {fmtContext(selectedModel.contextWindow)}</Badge>
+                  {variantOf(selectedModel.id) !== 'base' && (
+                    <Badge variant="outline" className="font-normal">{variantOf(selectedModel.id)}</Badge>
+                  )}
+                </div>
+              ) : null}
             </div>
 
             <div className="grid gap-2">
-              <Label htmlFor="system-prompt">System Prompt (optional)</Label>
+              <Label htmlFor="psys">System Prompt {systemPrompt ? <span className="text-muted-foreground">(opcional)</span> : null}</Label>
               <textarea
-                id="system-prompt"
+                id="psys"
                 value={systemPrompt}
                 onChange={(e) => setSystemPrompt(e.target.value)}
-                placeholder="You are a helpful assistant..."
+                placeholder="Você é um assistente prestativo…"
                 rows={3}
-                className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 resize-none"
+                className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs resize-none placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               />
             </div>
 
             <div className="grid gap-2">
-              <Label htmlFor="user-message">User Message</Label>
+              <Label htmlFor="pusr">Mensagem do usuário</Label>
               <textarea
-                id="user-message"
+                id="pusr"
                 value={userMessage}
                 onChange={(e) => setUserMessage(e.target.value)}
-                placeholder="Enter your message..."
-                rows={4}
-                className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 resize-none"
+                placeholder="Escreva sua mensagem…"
+                rows={6}
+                className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs resize-none placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                onKeyDown={(e) => {
+                  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                    e.preventDefault()
+                    handleSend()
+                  }
+                }}
               />
             </div>
 
             <div className="flex flex-wrap items-center gap-6">
               <div className="flex items-center gap-2">
-                <Switch id="stream" checked={stream} onCheckedChange={setStream} />
-                <Label htmlFor="stream" className="cursor-pointer">
-                  Stream
-                </Label>
+                <Switch id="strm" checked={stream} onCheckedChange={setStream} />
+                <Label htmlFor="strm" className="cursor-pointer">Stream</Label>
               </div>
-
               <div className="flex items-center gap-2">
-                <Switch id="thinking" checked={thinking} onCheckedChange={setThinking} />
-                <Label htmlFor="thinking" className="cursor-pointer">
-                  Thinking
-                </Label>
+                <Switch id="thk" checked={thinking} onCheckedChange={setThinking} />
+                <Label htmlFor="thk" className="cursor-pointer">Thinking</Label>
               </div>
             </div>
 
@@ -194,58 +275,84 @@ export function PlaygroundPage() {
               {loading ? (
                 <Button variant="destructive" onClick={handleStop}>
                   <Square className="size-4" />
-                  Stop
+                  Parar
                 </Button>
               ) : (
                 <Button onClick={handleSend} disabled={!userMessage.trim()}>
                   <Send className="size-4" />
-                  Send
+                  Enviar
                 </Button>
               )}
-              <Button variant="outline" onClick={handleClear}>
+              <Button variant="outline" onClick={handleClear} disabled={!hasResponse && !userMessage}>
                 <Trash2 className="size-4" />
-                Clear
+                Limpar
               </Button>
             </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      {(response || thinkingContent) && (
-        <Card>
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-base">Response</CardTitle>
-              <div className="flex items-center gap-2">
-                {thinkingContent && <Badge variant="secondary">Thinking</Badge>}
-                <Button variant="ghost" size="sm" onClick={handleCopy}>
-                  <Copy className="size-4" />
-                </Button>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-4">
-              {thinkingContent && (
-                <div>
-                  <Label className="text-xs text-muted-foreground mb-2 block">Thinking</Label>
-                  <div className="max-h-96 overflow-auto rounded-md bg-zinc-950 p-4 text-sm font-mono text-zinc-50">
-                    <pre className="whitespace-pre-wrap break-words">{thinkingContent}</pre>
-                  </div>
-                </div>
-              )}
-              <div>
-                {thinkingContent && (
-                  <Label className="text-xs text-muted-foreground mb-2 block">Response</Label>
-                )}
-                <div className="max-h-96 overflow-auto rounded-md bg-zinc-950 p-4 text-sm font-mono text-zinc-50">
-                  <pre className="whitespace-pre-wrap break-words">{response}</pre>
-                </div>
-              </div>
-            </div>
+            <p className="text-xs text-muted-foreground">Dica: Ctrl/⌘ + Enter envia a mensagem.</p>
           </CardContent>
         </Card>
-      )}
+
+        <Card className={hasResponse ? 'lg:self-start' : ''}>
+          <CardHeader>
+            <div className="flex items-center justify-between gap-2">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Terminal className="size-4" />
+                Resposta
+              </CardTitle>
+              <div className="flex items-center gap-2">
+                {model && hasResponse ? <Badge variant="secondary" className="font-mono">{model}</Badge> : null}
+                {durationMs != null ? (
+                  <Badge variant="outline" className="font-mono">{durationMs}ms</Badge>
+                ) : null}
+              </div>
+            </div>
+            <CardDescription>
+              {hasResponse
+                ? `${thinkingContent ? 'raciocínio + ' : ''}${response.length.toLocaleString('pt-BR')} caracteres`
+                : 'A resposta aparecerá aqui após o envio.'}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {!hasResponse ? (
+              <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
+                <MessageSquare className="size-10 text-muted-foreground" />
+                <p className="text-sm text-muted-foreground">
+                  Nenhuma resposta ainda. Configure a requisição e clique em Enviar.
+                </p>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-4">
+                {thinkingContent && (
+                  <div>
+                    <Label className="mb-2 block text-xs text-muted-foreground">Raciocínio</Label>
+                    <div className="max-h-72 overflow-auto rounded-md border bg-muted/20 p-4">
+                      <pre className="font-mono text-xs whitespace-pre-wrap break-words text-muted-foreground">{thinkingContent}</pre>
+                    </div>
+                  </div>
+                )}
+                {response && (
+                  <div>
+                    <Label className="mb-2 block text-xs text-muted-foreground">Conteúdo</Label>
+                    <div className="max-h-96 overflow-auto rounded-md border bg-muted/20 p-4">
+                      <pre className="font-mono text-sm whitespace-pre-wrap break-words">{response}</pre>
+                    </div>
+                  </div>
+                )}
+                <div className="flex flex-wrap gap-2">
+                  <Button variant="outline" size="sm" onClick={handleCopy} disabled={!response}>
+                    <Copy className="size-3.5" />
+                    Copiar resposta
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={handleCopyCurl} disabled={!userMessage.trim()}>
+                    <Terminal className="size-3.5" />
+                    Copiar cURL
+                  </Button>
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
     </div>
   )
 }

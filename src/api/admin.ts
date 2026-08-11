@@ -19,16 +19,17 @@ import {
   getAccountCooldownInfo,
   getAccountActiveLoad,
   getInUseAccounts,
+  clearAccountCooldown,
 } from '../core/account-manager.js'
 import { listUsers, upsertUser, deleteUserById, getUserById, listSessions } from '../core/database.js'
 import { getUserActiveStreams } from '../core/user-manager.js'
 import { getSessionCount, removeSession, resetAllSessions } from '../services/session-manager.js'
 import { getAllSeries } from '../core/time-series.js'
 import { readEnvFile, persistEnvPatch, restartServer, SETTINGS_ALLOWLIST, SETTINGS_SECRETS, BOOLEAN_KEYS, INTEGER_KEYS } from '../core/env-settings.js'
-import { renderDashboard } from './admin-dashboard.js'
 import { logBuffer } from '../core/log-buffer.js'
 import { getTopUsers, getModelUsage } from '../core/usage-tracker.js'
 import { getModelContextWindow } from '../core/model-registry.js'
+import { fetchFullModelCatalog } from './models.js'
 
 export const adminApp = new Hono()
 
@@ -472,7 +473,7 @@ adminApp.post('/api/sessions/clear', adminGuard, (c) => {
 
 // --- Models -----------------------------------------------------------------
 
-adminApp.get('/api/models', adminGuard, (c) => {
+adminApp.get('/api/models', adminGuard, async (c) => {
   const usage = getModelUsage()
   const entries = Object.entries(usage).sort(([, a], [, b]) => b - a)
   const models = entries.map(([id, count]) => ({
@@ -480,7 +481,25 @@ adminApp.get('/api/models', adminGuard, (c) => {
     contextWindow: getModelContextWindow(id),
     requestCount: count,
   }))
-  return c.json(models)
+
+  let catalog: any[] = []
+  try {
+    catalog = await fetchFullModelCatalog()
+  } catch (err: any) {
+    console.warn('Failed to load model catalog:', err?.message)
+  }
+
+  const usageMap = new Map(entries)
+  const catalogWithUsage = catalog.map((m) => ({
+    id: m.id,
+    name: m.name,
+    contextWindow: m.context_window ?? getModelContextWindow(m.id),
+    capabilities: m.capabilities,
+    owned_by: m.owned_by,
+    requestCount: usageMap.get(m.id) ?? 0,
+  }))
+
+  return c.json({ models, catalog: catalogWithUsage })
 })
 
 // --- Usage stats ------------------------------------------------------------
@@ -586,9 +605,17 @@ adminApp.get('*', (c) => {
   // unknown paths fall back to index.html for SPA routing.
   const file = distFileSafe(rel) || distFileSafe('index.html')
   if (!file) {
-    // Legacy inline dashboard (built web/ not present).
-    if (verifySession(c)) return c.html(renderDashboard(false))
-    return c.html(renderDashboard(true))
+    return c.html(
+      `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>QwenProxy · Admin</title></head>` +
+      `<body style="font-family:ui-monospace,Menlo,Consolas,monospace;background:#0b0e0a;color:#d8e0c8;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px">` +
+      `<div style="max-width:520px;border:1px solid #333;padding:28px;background:#11150f"><p style="color:#c8f542;font-size:18px;margin:0 0 10px">Dashboard não compilado</p>` +
+      `<p style="font-size:13px;line-height:1.6">O painel React não foi construído. Execute na raiz do projeto:</p>` +
+      `<pre style="background:#0e120b;border:1px solid #333;padding:12px;font-size:12px">npm --prefix web install
+npm run build:admin</pre>` +
+      `<p style="font-size:12px;color:#8b957d">Depois recarregue esta página.</p></div></body></html>`,
+      200,
+      { 'Content-Type': 'text/html; charset=utf-8' },
+    )
   }
   const ext = path.extname(file).toLowerCase()
   if (ext === '.html' || rel === 'index.html') {

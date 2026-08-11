@@ -2,6 +2,7 @@ import type { QwenAccount} from './accounts.js';
 import { loadAccounts, updateAccountCooldown, invalidateAccountsCache as invalidateAccountsCacheSource } from './accounts.js'
 import { config } from './config.js'
 import { getBaseAccountId, makeAccountLaneId } from './account-lanes.js'
+import { RetryableQwenStreamError } from '../services/error-handler.js'
 
 let currentIndex = 0
 const inUseAccounts = new Set<string>()
@@ -141,6 +142,32 @@ export function releaseAccountInUse(accountId: string): void {
 // free account wait on a signal instead of polling fixed intervals.
 // ---------------------------------------------------------------------------
 
+// Ready lanes: browser context created, the page is on the chat.qwen.ai origin
+// AND the anti-bot headers (bx-ua/bx-umidtoken) were already captured for it.
+// The router prefers ready lanes so incoming requests never land on a lane that
+// is still being warmed (page navigation / header interception). Otherwise a
+// request right after startup hits a lane mid-warmup and fails with "Cannot
+// fetch Qwen completion outside an active Qwen browser page".
+const readyAccounts = new Set<string>()
+
+export function markAccountReady(accountId: string): void {
+  if (!accountId) return
+  readyAccounts.add(accountId)
+}
+
+export function markAccountNotReady(accountId: string): void {
+  if (!accountId) return
+  readyAccounts.delete(accountId)
+}
+
+export function isAccountReady(accountId: string): boolean {
+  return readyAccounts.has(accountId)
+}
+
+export function getReadyAccountCount(): number {
+  return readyAccounts.size
+}
+
 const accountLoad = new Map<string, number>()
 let freeListeners: Array<() => void> = []
 
@@ -190,6 +217,47 @@ export function onAccountFreed(): { promise: Promise<void>; cancel: () => void }
   }
 }
 
+/**
+ * Acquires one of the per-REAL-account concurrent stream slots, waiting up to
+ * `timeoutMs` for a slot to free (signalled by `markAccountStreamEnd`). Every
+ * lane of the same account shares a single bucket, so this caps concurrency
+ * against the Qwen backend no matter how many lanes are configured — lanes
+ * beyond the cap do not increase throughput, they only trigger 429s. Returns a
+ * release function that must be called exactly once when the stream finishes.
+ */
+export async function acquireAccountStreamSlot(accountId: string, timeoutMs: number): Promise<() => void> {
+  const base = getBaseAccountId(accountId) || accountId
+  const limit = Math.max(1, config.accounts.maxStreamsPerAccount)
+  const waitStart = Date.now()
+
+  for (;;) {
+    const load = accountLoad.get(base) ?? 0
+    if (load < limit) {
+      markAccountStreamStart(base)
+      let released = false
+      return () => {
+        if (released) return
+        released = true
+        markAccountStreamEnd(base)
+      }
+    }
+
+    if (Date.now() - waitStart >= timeoutMs) {
+      throw new RetryableQwenStreamError(
+        `All ${limit} concurrent stream slot(s) for account ${base} are in use; timed out after ${timeoutMs}ms`,
+        2000 + Math.floor(Math.random() * 1000),
+      )
+    }
+
+    const freed = onAccountFreed()
+    await Promise.race([
+      new Promise(r => setTimeout(r, 500)),
+      freed.promise,
+    ])
+    freed.cancel()
+  }
+}
+
 export function getAccountById(accountId: string): QwenAccount | null {
   if (!accountId) return null;
   const accounts = getAccountsWithCooldownSync()
@@ -207,10 +275,13 @@ export function getNextAccount(forceReset?: boolean): QwenAccount | null {
   }
 
   const viable: QwenAccount[] = []
+  // Only gate on readiness when at least one lane is already ready; otherwise
+  // every lane is still warming up (startup) and we must pick from all of them.
+  const anyReady = accounts.some(a => isAccountReady(a.id))
   for (let i = 0; i < accounts.length; i++) {
     const account = accounts[currentIndex % accounts.length]
     currentIndex = (currentIndex + 1) % accounts.length
-    if (!isAccountOnCooldown(account.id) && !isAccountInUse(account.id)) {
+    if (!isAccountOnCooldown(account.id) && !isAccountInUse(account.id) && (!anyReady || isAccountReady(account.id))) {
       viable.push(account)
     }
   }
@@ -253,11 +324,12 @@ export function getNextAvailableAccount(triedAccountIds?: Set<string> | string):
   // 1. Try to find an untried account that is NOT on cooldown, preferring the
   // least-loaded one (ties keep round-robin order from currentIndex).
   const candidates: QwenAccount[] = []
+  const anyReady = accounts.some(a => isAccountReady(a.id))
   for (let i = 0; i < accounts.length; i++) {
     const idx = (currentIndex + i) % accounts.length
     const account = accounts[idx]
     if (triedSet.has(account.id)) continue
-    if (!isAccountOnCooldown(account.id) && !isAccountInUse(account.id)) {
+    if (!isAccountOnCooldown(account.id) && !isAccountInUse(account.id) && (!anyReady || isAccountReady(account.id))) {
       candidates.push(account)
     }
   }

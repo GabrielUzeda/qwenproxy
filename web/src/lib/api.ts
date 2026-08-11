@@ -105,6 +105,20 @@ export interface ModelInfo {
   requestCount: number
 }
 
+export interface CatalogModel {
+  id: string
+  name?: string
+  contextWindow?: number
+  capabilities?: string[]
+  owned_by?: string
+  requestCount: number
+}
+
+export interface ModelsData {
+  models: ModelInfo[]
+  catalog: CatalogModel[]
+}
+
 export interface UsageUser {
   userId: string
   email: string
@@ -142,7 +156,7 @@ export const api = {
   sessions: () => request<SessionInfo[]>('/sessions'),
   deleteSession: (key: string) => request(`/sessions/${key}`, { method: 'DELETE' }),
   clearSessions: () => request('/sessions/clear', { method: 'POST' }),
-  models: () => request<ModelInfo[]>('/models'),
+  models: () => request<ModelsData>('/models'),
   usage: (limit?: number) => request<UsageData>(`/usage${limit ? `?limit=${limit}` : ''}`),
   testChat: async (payload: { model: string; messages: Array<{ role: string; content: string }>; stream: boolean; thinking?: { type: string } }): Promise<Response> => {
     return fetch('/admin/api/test-chat', {
