@@ -1,3 +1,15 @@
+# [1.15.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.14.0...v1.15.0) (2026-08-11)
+
+
+### Bug Fixes
+
+* clear in-memory cooldown on admin clear-cooldown and expose lane readiness/cap ([c6b12d3](https://github.com/pedrofariasx/qwenproxy/commit/c6b12d3dc8da60f625607d701aaf4eaf4be003b2))
+
+
+### Features
+
+* add context tokenizer with model-aware truncation and expanded model/admin surfaces ([982dd2f](https://github.com/pedrofariasx/qwenproxy/commit/982dd2f2bd7168988a77a68ec4189adec3b7a5d2))
+
 # [1.14.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.13.2...v1.14.0) (2026-08-10)
 
 
