@@ -27,6 +27,7 @@ import { listUsers, upsertUser, deleteUserById, getUserById, listSessions } from
 import { getUserActiveStreams } from '../core/user-manager.js'
 import { getSessionCount, removeSession, resetAllSessions } from '../services/session-manager.js'
 import { getStreamRegistry, abortStream } from '../core/stream-registry.js'
+import { getRecentToolCalls } from '../core/tool-call-debug.js'
 import { getAllSeries } from '../core/time-series.js'
 import { readEnvFile, persistEnvPatch, restartServer, SETTINGS_ALLOWLIST, SETTINGS_SECRETS, BOOLEAN_KEYS, INTEGER_KEYS } from '../core/env-settings.js'
 import { LIVE_KEYS, applyRuntimeSetting, getLiveSettings, getRuntimeBool } from '../core/runtime-config.js'
@@ -356,6 +357,10 @@ adminApp.post('/api/streams/:key/stop', adminGuard, (c) => {
 })
 
 // --- Bulk actions / exports -----------------------------------------------
+
+adminApp.get('/api/debug/toolcalls', adminGuard, (c) => {
+  return c.json({ toolCalls: getRecentToolCalls() })
+})
 
 adminApp.post('/api/clear-cooldowns', adminGuard, (c) => {
   const accounts = listAccounts()

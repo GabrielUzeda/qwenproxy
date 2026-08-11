@@ -248,7 +248,7 @@ export async function chatCompletions(c: Context) {
         if (!toolName && msg.tool_call_id) {
           toolName = toolCallIdToName.get(msg.tool_call_id);
         }
-        promptParts.push(`Tool Response (${toolName || 'tool'}): ${contentStr || ''}`);
+        promptParts.push(`Tool Response (${toolName || 'tool'}): ${contentStr || ''}\n`);
       }
     }
 

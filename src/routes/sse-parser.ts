@@ -74,12 +74,15 @@ export function getIncrementalDelta(oldStr: string, newStr: string, prevLength: 
     };
   }
 
-  const combined = oldStr + newStr;
+  // IMPORTANT: matchedContent must be the REAL accumulated text (newStr). Using
+  // old+new previously duplicated content, which corrupted the streaming state
+  // and made the tool parser see every <tool_call> block twice — emitting
+  // duplicate tool calls with different ids.
   return {
     delta: newStr,
-    matchedContent: combined,
-    contentLength: combined.length,
-    contentSuffix: combined.slice(-64)
+    matchedContent: newStr,
+    contentLength: newStr.length,
+    contentSuffix: newStr.slice(-64)
   };
 }
 

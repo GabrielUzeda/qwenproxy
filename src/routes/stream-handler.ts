@@ -6,6 +6,7 @@ import { getIncrementalDelta, parseQwenErrorPayload } from './sse-parser.js';
 import { looksLikeUnwrappedToolCall, parseUnwrappedToolCalls } from './tool-handler.js';
 import { isDegenerateAnswer } from '../utils/degenerate-answer.js';
 import { removeStream } from '../core/stream-registry.js';
+import { recordToolCall } from '../core/tool-call-debug.js';
 import { updateSessionParent, markHistoryComplete } from '../services/qwen.js';
 import { countTokens } from '../core/tokenizer.js';
 
@@ -123,7 +124,11 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       const emitStreamingToolCall = (tc: { id: string; name: string; arguments: Record<string, unknown> }, index: number) => {
         if (emittedStreamingToolIds.has(tc.id)) return;
         emittedStreamingToolIds.add(tc.id);
-        bufferedWrite(`data: ${JSON.stringify({
+        // `arguments` MUST be a JSON string in OpenAI format. Never double-encode.
+        const argsStr = typeof tc.arguments === 'string'
+          ? tc.arguments
+          : JSON.stringify(tc.arguments ?? {});
+        const toolCallChunk = `data: ${JSON.stringify({
           id: ctx.completionId,
           object: 'chat.completion.chunk',
           created: createdTimestamp,
@@ -133,10 +138,12 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
               index,
               id: tc.id,
               type: 'function',
-              function: { name: tc.name, arguments: JSON.stringify(tc.arguments) }
+              function: { name: tc.name, arguments: argsStr }
             }]
           })]
-        })}\n\n`);
+        })}\n\n`;
+        recordToolCall(ctx.completionId, 'streaming', toolCallChunk);
+        bufferedWrite(toolCallChunk);
       };
 
       const createdTimestamp = Math.floor(Date.now() / 1000);
@@ -160,6 +167,10 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       let firstPayloadFlushed = false;
       const estimatedPromptTokens = countTokens(ctx.finalPrompt);
       const fastWriteContent = (content: string) => {
+        // Once a tool call has been streamed, never send more content chunks:
+        // OpenAI clients treat assistant content AFTER tool_calls as an error
+        // (and the model should stop after </tool_call> anyway).
+        if (emittedStreamingToolIds.size > 0) return;
         bufferedWrite(contentPrefix + escapeJsonString(content) + chunkSuffix);
         if (!firstPayloadFlushed) { firstPayloadFlushed = true; flushWrites(); }
       };
@@ -410,7 +421,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
               const tc = unwrappedToolCalls[idx];
               emitStreamingToolCall(tc, baseIndex + idx);
             }
-          } else {
+          } else if (emittedStreamingToolIds.size === 0) {
             writeEvent({
               id: ctx.completionId,
               object: 'chat.completion.chunk',
@@ -504,11 +515,10 @@ export async function collectNonStreamingResult(
   const pushToolCall = (tc: { id: string; name: string; arguments: Record<string, unknown> }) => {
     if (seenToolCallIds.has(tc.id)) return;
     seenToolCallIds.add(tc.id);
-    toolCallsOut.push({
-      id: tc.id,
-      type: 'function',
-      function: { name: tc.name, arguments: JSON.stringify(tc.arguments) }
-    });
+    const argsStr = typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments ?? {});
+    const entry = { id: tc.id, type: 'function', function: { name: tc.name, arguments: argsStr } };
+    recordToolCall(completionId, 'non-streaming', JSON.stringify(entry));
+    toolCallsOut.push(entry);
   };
 
   const qwenParser = new QwenStreamParser(uiSessionId, {
