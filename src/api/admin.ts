@@ -26,8 +26,10 @@ import {
 import { listUsers, upsertUser, deleteUserById, getUserById, listSessions } from '../core/database.js'
 import { getUserActiveStreams } from '../core/user-manager.js'
 import { getSessionCount, removeSession, resetAllSessions } from '../services/session-manager.js'
+import { getStreamRegistry, abortStream } from '../core/stream-registry.js'
 import { getAllSeries } from '../core/time-series.js'
 import { readEnvFile, persistEnvPatch, restartServer, SETTINGS_ALLOWLIST, SETTINGS_SECRETS, BOOLEAN_KEYS, INTEGER_KEYS } from '../core/env-settings.js'
+import { LIVE_KEYS, applyRuntimeSetting, getLiveSettings, getRuntimeBool } from '../core/runtime-config.js'
 import { logBuffer } from '../core/log-buffer.js'
 import { getTopUsers, getModelUsage } from '../core/usage-tracker.js'
 import { getModelContextWindow } from '../core/model-registry.js'
@@ -171,15 +173,26 @@ adminApp.get('/api/overview', adminGuard, async (c) => {
 async function buildOverview(): Promise<any> {
   const requestsTotal = (metrics.get('requests.total')?.value as number) || 0
   const errors = (metrics.get('requests.errors')?.value as number) || 0
+  const requests4xx = (metrics.get('requests.4xx')?.value as number) || 0
+  const requests5xx = (metrics.get('requests.5xx')?.value as number) || 0
+  const requestsCompletions = (metrics.get('requests.completions')?.value as number) || 0
   const latency = metrics.get('latency.request')?.value as any
+  const latencyCompletion = metrics.get('latency.completion')?.value as any
 
   const users = listUsers()
-  let totalUserStreams = 0
+  let totalUserStreams = getUserActiveStreams('global')
   const userList = users.map(u => {
     const streams = getUserActiveStreams(u.id)
     totalUserStreams += streams
     return { id: u.id, email: u.email, streams }
   })
+
+  // Real per-account stream counts from the stream registry.
+  const streamCounts = new Map<string, number>()
+  for (const s of getStreamRegistry().values()) {
+    const acct = s.accountId || 'unknown'
+    streamCounts.set(acct, (streamCounts.get(acct) || 0) + 1)
+  }
 
   const accounts = listAccounts().map(a => ({
     id: a.id,
@@ -188,6 +201,7 @@ async function buildOverview(): Promise<any> {
     cooldownReason: getAccountCooldownInfo(a.id)?.reason ?? null,
     activeLoad: getAccountActiveLoad(a.id),
     ready: isAccountReady(a.id),
+    streams: streamCounts.get(a.id) || 0,
   }))
   const inUse = getInUseAccounts()
 
@@ -198,10 +212,20 @@ async function buildOverview(): Promise<any> {
   return {
     uptime: Math.floor(process.uptime()),
     startedAt: Math.floor(Date.now() / 1000) - Math.floor(process.uptime()),
+    watchdog: {
+      overall: (metrics.get('watchdog.overall')?.value as number) || 0,
+      ram: (metrics.get('watchdog.ram.status')?.value as number) || 0,
+    },
     requestsTotal,
+    requestsCompletions,
     requestsErrors: errors,
+    requests4xx,
+    requests5xx,
     requestsSuccessRate: requestsTotal > 0 ? Math.max(0, (1 - errors / requestsTotal) * 100) : 100,
     latency: latency && typeof latency === 'object' ? { sum: latency.sum, count: latency.count } : undefined,
+    latencyCompletion: latencyCompletion && typeof latencyCompletion === 'object'
+      ? { sum: latencyCompletion.sum, count: latencyCompletion.count }
+      : undefined,
     memory: {
       rss: mem.rss,
       heapUsed: mem.heapUsed,
@@ -219,7 +243,7 @@ async function buildOverview(): Promise<any> {
     activeStreamsMetric: (metrics.get('streams.active')?.value as number) || 0,
     warmPool: getWarmPoolStats(),
     sessionCount: getSessionCount(),
-    guestMode: process.env.QWEN_GUEST_MODE_ONLY === 'true',
+    guestMode: getRuntimeBool('QWEN_GUEST_MODE_ONLY', false),
     singleAccountMode: config.accounts.singleAccountMode,
     lanes: config.accounts.lanes,
     maxStreamsPerAccount: config.accounts.maxStreamsPerAccount,
@@ -271,7 +295,7 @@ adminApp.get('/api/accounts', adminGuard, (c) => {
     activeLoad: getAccountActiveLoad(a.id),
     ready: isAccountReady(a.id),
   }))
-  return c.json({ accounts, inUse: [...getInUseAccounts()] })
+  return c.json({ accounts, inUse: [...getInUseAccounts()], maxStreamsPerAccount: config.accounts.maxStreamsPerAccount })
 })
 
 adminApp.post('/api/accounts', adminGuard, async (c) => {
@@ -309,6 +333,41 @@ adminApp.post('/api/accounts/:id/refresh', adminGuard, async (c) => {
   } catch (err: any) {
     return c.json({ error: err.message }, 400)
   }
+})
+
+// --- Active streams -------------------------------------------------------
+
+adminApp.get('/api/streams', adminGuard, (c) => {
+  const now = Date.now()
+  const streams = [...getStreamRegistry().entries()].map(([key, s]) => ({
+    key,
+    accountId: s.accountId,
+    uiSessionId: s.uiSessionId,
+    targetResponseId: s.targetResponseId,
+    createdAt: s.createdAt,
+    ageMs: now - s.createdAt,
+  }))
+  return c.json({ streams })
+})
+
+adminApp.post('/api/streams/:key/stop', adminGuard, (c) => {
+  const stopped = abortStream(c.req.param('key'))
+  return c.json({ ok: stopped })
+})
+
+// --- Bulk actions / exports -----------------------------------------------
+
+adminApp.post('/api/clear-cooldowns', adminGuard, (c) => {
+  const accounts = listAccounts()
+  for (const a of accounts) clearAccountCooldown(a.id)
+  return c.json({ ok: true, cleared: accounts.length })
+})
+
+adminApp.get('/api/metrics/export', adminGuard, (c) => {
+  return c.body(metrics.formatPrometheus(), 200, {
+    'Content-Type': 'text/plain; version=0.0.4',
+    'Content-Disposition': 'attachment; filename="qwenproxy-metrics.txt"',
+  })
 })
 
 // --- Users / API keys -------------------------------------------------------
@@ -388,6 +447,8 @@ adminApp.get('/api/settings', adminGuard, (c) => {
     types,
     allowlist: [...SETTINGS_ALLOWLIST],
     locked: [...SETTINGS_SECRETS],
+    liveKeys: [...LIVE_KEYS],
+    runtime: getLiveSettings(),
     effective: {
       warmPoolSize: config.warmPool.size,
       lanes: config.accounts.lanes,
@@ -403,8 +464,31 @@ adminApp.post('/api/settings', adminGuard, async (c) => {
   const body: any = await c.req.json().catch(() => null)
   if (!body || typeof body !== 'object') return c.json({ error: 'patch inválido' }, 400)
   try {
-    const applied = persistEnvPatch(body)
-    return c.json({ ok: true, applied, restartRequired: applied.length > 0 })
+    // Split the patch: LIVE_KEYS apply immediately (no restart); the rest are
+    // startup-only and still require a restart. Both are persisted to .env.
+    const livePatch: Record<string, string | null> = {}
+    const restartPatch: Record<string, string | null> = {}
+    for (const [key, value] of Object.entries(body)) {
+      if (LIVE_KEYS.has(key)) livePatch[key] = value as string | null
+      else restartPatch[key] = value as string | null
+    }
+
+    let liveApplied: string[] = []
+    if (Object.keys(livePatch).length > 0) {
+      const persisted = persistEnvPatch(livePatch)
+      for (const key of persisted) {
+        applyRuntimeSetting(key, livePatch[key] === null ? null : String(livePatch[key]))
+      }
+      liveApplied = persisted
+    }
+
+    const restartApplied = Object.keys(restartPatch).length > 0 ? persistEnvPatch(restartPatch) : []
+    return c.json({
+      ok: true,
+      applied: [...liveApplied, ...restartApplied],
+      live: liveApplied,
+      restartRequired: restartApplied.length > 0,
+    })
   } catch (err: any) {
     return c.json({ error: err.message }, 400)
   }
@@ -549,21 +633,19 @@ adminApp.post('/api/test-chat', adminGuard, async (c) => {
     body: JSON.stringify(payload),
   })
   if (stream) {
-    c.header('Content-Type', 'text/event-stream')
-    c.header('Cache-Control', 'no-cache')
-    c.header('Connection', 'keep-alive')
-    return streamSSE(c, async (s) => {
-      try {
-        const reader = res.body?.getReader()
-        if (!reader) return
-        const decoder = new TextDecoder()
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          const chunk = decoder.decode(value, { stream: true })
-          await s.writeSSE({ data: chunk })
-        }
-      } catch { /* ignore */ }
+    // Pass the upstream SSE body through RAW. Re-wrapping it with writeSSE
+    // would nest "data: data: {...}" lines and the client's JSON.parse fails
+    // (playground showed truncated/blank responses). Preserve the upstream
+    // status so 429/5xx reach the client as errors, not "200 with SSE".
+    if (!res.body) return c.json({ error: 'upstream returned empty body' }, 502)
+    return new Response(res.body, {
+      status: res.status,
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      },
     })
   }
   const json = await res.json()

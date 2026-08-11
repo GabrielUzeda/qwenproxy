@@ -7,6 +7,7 @@ import { getClientHintsHeaders } from './browser-manager.js';
 import type { Page } from 'playwright';
 import { releaseAccountInUse, acquireAccountStreamSlot } from '../core/account-manager.js';
 import { getBaseAccountId } from '../core/account-lanes.js';
+import { getRuntimeBool, getRuntimeInt } from '../core/runtime-config.js';
 import { BAXIA_IFRAME_SELECTOR, solveBaxiaCaptcha } from './captcha-solver.js';
 import { uploadLargePromptAsFile } from '../routes/upload.js';
 import { getSession, setSession, getSessionParent, updateSessionParent } from './session-manager.js';
@@ -89,7 +90,7 @@ const DIRECT_FETCH_FAILURE_THRESHOLD = 3;
 const DIRECT_FETCH_BLOCK_MS = 5 * 60 * 1000;
 
 function canUseDirectFetch(accountId?: string): boolean {
-  if (!config.directFetch.enabled) return false;
+  if (!getRuntimeBool('QWEN_DIRECT_FETCH', config.directFetch.enabled)) return false;
   if (!accountId || accountId === 'guest' || accountId === 'global') return false;
   const base = getBaseAccountId(accountId) || accountId;
   return (directFetchBlockedUntil.get(base) || 0) <= Date.now();
@@ -684,7 +685,7 @@ export async function createQwenStream(
   // Reserve a concurrency slot for the real account. All lanes share one
   // budget, so requests queue here (up to the configured wait) instead of
   // hammering the Qwen backend and tripping its per-account rate limits.
-  const releaseAccountStream = await acquireAccountStreamSlot(streamLockKey, config.accounts.streamSlotWaitMs);
+  const releaseAccountStream = await acquireAccountStreamSlot(streamLockKey, getRuntimeInt('ACCOUNT_STREAM_SLOT_WAIT_MS', config.accounts.streamSlotWaitMs));
   let accountStreamReleased = false;
 
   let sessionLocked = false;

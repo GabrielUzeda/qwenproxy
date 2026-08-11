@@ -39,6 +39,7 @@ export function sampleNow(): void {
 
   // Throughput deltas per interval.
   push('requests', diff('requests.total', counter('requests.total')))
+  push('completions', diff('completions.total', counter('requests.completions')))
   push('errors', diff('requests.errors', counter('requests.errors')))
 
   // Average latency within the interval.

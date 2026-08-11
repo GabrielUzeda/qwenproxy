@@ -3,10 +3,11 @@ import { getActiveAccountCount, markAccountReady } from '../core/account-manager
 import { getBaseAccountId } from '../core/account-lanes.js';
 import {
   CHROME_UA,
-  HEADERS_TTL,
   COOKIE_CACHE_TTL,
   REFRESH_THRESHOLD,
   GUEST_HEADERS_TTL,
+  getHeadersTtlMs,
+  getBackgroundHeaderRefresh,
   sleep,
   accountContexts,
   accountPages,
@@ -218,8 +219,8 @@ export async function getQwenHeaders(forceNew = false, accountId?: string): Prom
 
   if (!forceNew && cache.cachedQwenHeaders) {
     const age = Date.now() - cache.lastHeadersTime;
-    if (age < HEADERS_TTL) {
-      if (config.headers.backgroundRefresh && age > HEADERS_TTL * REFRESH_THRESHOLD && !cache.refreshInProgress) {
+    if (age < getHeadersTtlMs()) {
+      if (getBackgroundHeaderRefresh() && age > getHeadersTtlMs() * REFRESH_THRESHOLD && !cache.refreshInProgress) {
         cache.refreshInProgress = true;
         getQwenHeaders(true, accountId).catch((err) => {
           console.warn(`[Playwright] Background header refresh failed for ${cacheKey}:`, (err as Error).message);
@@ -233,7 +234,7 @@ export async function getQwenHeaders(forceNew = false, accountId?: string): Prom
 
   const release = await getUiMutex(cacheKey).acquire();
   try {
-    if (!forceNew && cache.cachedQwenHeaders && (Date.now() - cache.lastHeadersTime < HEADERS_TTL)) {
+    if (!forceNew && cache.cachedQwenHeaders && (Date.now() - cache.lastHeadersTime < getHeadersTtlMs())) {
       return cache.cachedQwenHeaders;
     }
     return await _getQwenHeadersInternal(forceNew, accountId);

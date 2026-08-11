@@ -43,6 +43,17 @@ app.use('*', async (c, next) => {
   const duration = Date.now() - start
   metrics.histogram('latency.request', duration)
   c.header('X-Response-Time', `${duration}ms`)
+
+  // Accurate error accounting by status: every 4xx/5xx response is an error.
+  // (Previously only >=500 counted, so waves of 429/401 looked like "success".)
+  const status = c.res.status
+  if (status >= 500) {
+    metrics.increment('requests.errors')
+    metrics.increment('requests.5xx')
+  } else if (status >= 400) {
+    metrics.increment('requests.errors')
+    metrics.increment('requests.4xx')
+  }
 })
 
 app.use('/v1/*', async (c, next) => {
@@ -92,6 +103,7 @@ app.get('/metrics', (c) => {
 
 app.onError((err, c) => {
   metrics.increment('requests.errors')
+  metrics.increment('requests.5xx')
   console.error('API Error:', err)
   return c.json({ error: err.message }, 500)
 })

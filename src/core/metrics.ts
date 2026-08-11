@@ -31,9 +31,14 @@ export class Metrics extends EventEmitter {
   private registerDefaults(): void {
     const defaults: Array<[string, MetricType, string]> = [
       ['requests.total', 'counter', 'Total requests processed'],
-      ['requests.errors', 'counter', 'Total request errors'],
+      ['requests.errors', 'counter', 'Requests answered with 4xx/5xx status'],
+      ['requests.4xx', 'counter', 'Requests answered with 4xx status'],
+      ['requests.5xx', 'counter', 'Requests answered with 5xx status'],
+      ['requests.completions', 'counter', 'Chat completions requests'],
       ['latency.request', 'histogram', 'Request latency (ms)'],
+      ['latency.completion', 'histogram', 'Completion latency to response start (ms)'],
       ['streams.active', 'gauge', 'Active SSE streams'],
+      ['streams.by.account', 'gauge', 'Active SSE streams per account'],
       ['streams.errors', 'counter', 'Stream errors'],
       ['memory.heap.used', 'gauge', 'Heap memory used (bytes)'],
       ['memory.heap.total', 'gauge', 'Heap memory total (bytes)'],
@@ -44,6 +49,7 @@ export class Metrics extends EventEmitter {
       ['cache.miss', 'counter', 'Cache misses'],
       ['cache.deleted', 'counter', 'Cache deletions'],
       ['cache.flushed', 'counter', 'Cache flushes'],
+      ['cache.evicted', 'counter', 'Cache evictions'],
       ['cache.value.size', 'histogram', 'Cache value size (bytes)'],
       ['cache.get.latency', 'histogram', 'Cache get latency (ms)'],
       ['watchdog.ram.status', 'gauge', 'Watchdog RAM status (0=ok, 1=warning, 2=critical)'],

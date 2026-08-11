@@ -7,6 +7,7 @@ import type { QwenAccount } from '../core/accounts.js';
 import { config } from '../core/config.js';
 import { getBaseAccountId } from '../core/account-lanes.js';
 import { markAccountNotReady } from '../core/account-manager.js';
+import { getRuntimeInt, getRuntimeBool } from '../core/runtime-config.js';
 import { getStealthScript } from './stealth.js';
 import { getFingerprintProfile, type FingerprintProfile } from './fingerprint.js';
 import { sleep } from '../utils/sleep.js';
@@ -120,6 +121,15 @@ export const HEADERS_TTL = config.headers.ttlMs;
 export const COOKIE_CACHE_TTL = 5 * 60 * 1000;
 export const REFRESH_THRESHOLD = 0.7;
 export const GUEST_HEADERS_TTL = 30 * 60 * 1000;
+
+// Header TTL / background refresh are read at call time so they can be tuned
+// live from the admin dashboard without restarting the server.
+export function getHeadersTtlMs(): number {
+  return getRuntimeInt('HEADERS_TTL_MS', config.headers.ttlMs)
+}
+export function getBackgroundHeaderRefresh(): boolean {
+  return getRuntimeBool('BACKGROUND_HEADER_REFRESH', config.headers.backgroundRefresh)
+}
 
 export const PROFILES_DIR = path.resolve(config.browser.userDataDir);
 

@@ -3,6 +3,7 @@ import { loadAccounts, updateAccountCooldown, invalidateAccountsCache as invalid
 import { config } from './config.js'
 import { getBaseAccountId, makeAccountLaneId } from './account-lanes.js'
 import { RetryableQwenStreamError } from '../services/error-handler.js'
+import { getRuntimeInt } from './runtime-config.js'
 
 let currentIndex = 0
 const inUseAccounts = new Set<string>()
@@ -227,7 +228,7 @@ export function onAccountFreed(): { promise: Promise<void>; cancel: () => void }
  */
 export async function acquireAccountStreamSlot(accountId: string, timeoutMs: number): Promise<() => void> {
   const base = getBaseAccountId(accountId) || accountId
-  const limit = Math.max(1, config.accounts.maxStreamsPerAccount)
+  const limit = Math.max(1, getRuntimeInt('ACCOUNT_MAX_CONCURRENT_STREAMS', config.accounts.maxStreamsPerAccount))
   const waitStart = Date.now()
 
   for (;;) {

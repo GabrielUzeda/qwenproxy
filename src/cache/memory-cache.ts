@@ -99,6 +99,7 @@ export class MemoryCache {
   }
 
   async get<T>(key: CacheKey): Promise<T | null> {
+    const start = Date.now()
     const fullKey = this.prefix + key
     const entry = this.store.get(fullKey)
 
@@ -108,11 +109,13 @@ export class MemoryCache {
         this.store.delete(fullKey)
       }
       metrics.increment('cache.miss')
+      metrics.histogram('cache.get.latency', Date.now() - start)
       return null
     }
 
     this.touch(fullKey)
     metrics.increment('cache.hit')
+    metrics.histogram('cache.get.latency', Date.now() - start)
     return entry.value as T
   }
 

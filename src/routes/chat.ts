@@ -23,6 +23,7 @@ import {
 import { handleStreamingResponse, collectNonStreamingResult } from './stream-handler.js';
 import { buildAnswerDirective } from '../utils/degenerate-answer.js';
 import { checkUserRateLimit, tryAcquireUserSlot, releaseUserSlot, getUserActiveStreams } from '../core/user-manager.js';
+import { getRuntimeBool } from '../core/runtime-config.js';
 import type { UserIdentity } from '../core/user-manager.js';
 import { trackUsage, trackModelUsage } from '../core/usage-tracker.js';
 
@@ -149,10 +150,12 @@ export async function chatCompletions(c: Context) {
   };
   let usageInputText = '';
   let usageModel = '';
+  const completionStart = Date.now();
 
   try {
     const body: OpenAIRequest = await c.req.json();
     const isStream = body.stream ?? false;
+    metrics.increment('requests.completions');
 
     if (user) {
       if (!checkUserRateLimit(user.id, user.rateLimitRpm)) {
@@ -366,7 +369,7 @@ export async function chatCompletions(c: Context) {
     }
     const baseStreamOptions = { sessionKey, economicalPrompt };
 
-    const isGuestModeOnly = process.env.QWEN_GUEST_MODE_ONLY?.toLowerCase() === 'true';
+    const isGuestModeOnly = getRuntimeBool('QWEN_GUEST_MODE_ONLY', false);
     const completionId = 'chatcmpl-' + crypto.randomUUID();
     const stopToken = crypto.randomUUID();
     let lastError: any = null;
@@ -595,11 +598,13 @@ export async function chatCompletions(c: Context) {
       trackUsage(user ? user.id : 'anonymous', inputText, completed.status !== 200);
       trackModelUsage(modelId);
       releaseUserSlotOnce();
+      metrics.histogram('latency.completion', Date.now() - completionStart);
       return c.json(completed.body, completed.status as any);
     }
 
     trackUsage(user ? user.id : 'anonymous', inputText, false);
     trackModelUsage(modelId);
+    metrics.histogram('latency.completion', Date.now() - completionStart);
     return handleStreamingResponse(c, {
       stream: acquired.stream,
       completionId,
@@ -620,9 +625,7 @@ export async function chatCompletions(c: Context) {
     releaseUserSlotOnce();
     console.error('Error in chatCompletions:', err)
     const status = err.upstreamStatus || 500
-    if (status >= 500) {
-      metrics.increment('requests.errors')
-    }
+    metrics.histogram('latency.completion', Date.now() - completionStart)
     trackUsage(user ? user.id : 'anonymous', usageInputText, true);
     trackModelUsage(usageModel);
     return c.json({ error: { message: err.message } }, status)
