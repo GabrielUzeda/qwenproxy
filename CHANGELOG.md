@@ -1,3 +1,10 @@
+# [1.20.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.19.1...v1.20.0) (2026-08-11)
+
+
+### Features
+
+* dev mode with instant HMR and theme-aware admin logo ([41e5eff](https://github.com/pedrofariasx/qwenproxy/commit/41e5eff7830ee962cd3ee023dced446cc27c4cf3))
+
 ## [1.19.1](https://github.com/pedrofariasx/qwenproxy/compare/v1.19.0...v1.19.1) (2026-08-11)
 
 
