@@ -333,6 +333,23 @@ estoura o limite recebe `429` com a mensagem correspondente.
 
 ---
 
+## Deploy em 1 clique
+
+> ⚠️ O proxy precisa de **navegador (Docker)** e **armazenamento persistente** (SQLite de sessões + perfis de conta). Não funciona em serverless (Vercel/Netlify/Cloud Run sem container).
+
+| Provedor | Botão | Observações |
+| --- | --- | --- |
+| **Render** (recomendado) | [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/pedrofariasx/qwenproxy) | Docker + disk persistente (1GB) configurados via `render.yaml`. Plano free com sleep — acorde via healthcheck. |
+| **Railway** | [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new?template=https://github.com/pedrofariasx/qwenproxy) | Detecta o `Dockerfile` automaticamente. **Crie um Volume** e monte em `/app/data` (perfis em `USER_DATA_DIR=/app/data/qwen_profiles`) para não perder sessões. |
+
+### Passos comuns após o deploy
+
+1. Abra `/admin` (auth por `ADMIN_PASSWORD` ou `API_KEY`).
+2. Adicione suas contas Qwen na aba **Contas** (ou defina `SINGLE_ACCOUNT_MODE` + `SINGLE_ACCOUNT_ID/EMAIL` no painel).
+3. Defina as env vars sensíveis no painel do provedor: `API_KEY`, `ADMIN_PASSWORD`, `QWEN_EMAIL`, `QWEN_PASSWORD`.
+
+---
+
 ## Deploy com Docker
 
 ### docker-compose.yml
@@ -343,13 +360,15 @@ services:
     build: .
     container_name: qwenproxy
     ports:
-      - "${PORT:-3000}:3000"
+      - "${PORT:-3000}:${PORT:-3000}"
     env_file:
-      - .env
+      - path: .env
+        required: false
     volumes:
       - qwenproxy_data:/app/data
       - qwenproxy_profiles:/app/qwen_profiles
     restart: unless-stopped
+    shm_size: '1gb'
     logging:
       driver: "json-file"
       options:
