@@ -1,3 +1,10 @@
+# [1.16.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.15.0...v1.16.0) (2026-08-11)
+
+
+### Features
+
+* direct Node completion fast path with per-account circuit breaker; silence no-explicit-any lint ([5fb2b82](https://github.com/pedrofariasx/qwenproxy/commit/5fb2b820932fbfd67634eb9f65c6dcd6c68cd887))
+
 # [1.15.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.14.0...v1.15.0) (2026-08-11)
 
 
