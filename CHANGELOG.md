@@ -1,3 +1,10 @@
+## [1.18.1](https://github.com/pedrofariasx/qwenproxy/compare/v1.18.0...v1.18.1) (2026-08-11)
+
+
+### Bug Fixes
+
+* tool-loop session continuity and queue requests instead of failing when lanes are busy ([ba6b22b](https://github.com/pedrofariasx/qwenproxy/commit/ba6b22b8f66604cc2fbefe0c4c3bc86739fe17b7))
+
 # [1.18.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.17.1...v1.18.0) (2026-08-11)
 
 
