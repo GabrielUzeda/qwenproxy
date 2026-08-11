@@ -64,7 +64,10 @@ const envSchema = z.object({
   LARGE_PROMPT_THRESHOLD: envInt(524288, 1),
   HYBRID_SESSIONS_ENABLED: envBool(true),
   HYBRID_SESSION_VERIFY: envBool(true),
+  HYBRID_SESSION_VERIFY_EVERY_MS: envInt(60000, 0),
   HYBRID_SESSION_TTL_MS: envInt(86400000, 1),
+  STREAM_DEGENERATE_GUARD: z.enum(['prone', 'always', 'off']).default('prone'),
+  AUTH_REQUIRED: envBool(false),
   USER_RATE_LIMIT_RPM: envInt(120, 0),
   USER_MAX_CONCURRENCY: envInt(8, 1),
   USER_API_KEYS: z.string().default(''),
@@ -169,8 +172,11 @@ export const config = {
   hybridSessions: {
     enabled: env.HYBRID_SESSIONS_ENABLED,
     verify: env.HYBRID_SESSION_VERIFY,
+    verifyEveryMs: env.HYBRID_SESSION_VERIFY_EVERY_MS,
     ttlMs: env.HYBRID_SESSION_TTL_MS,
   },
+  streamDegenerateGuard: env.STREAM_DEGENERATE_GUARD,
+  authRequired: env.AUTH_REQUIRED,
   users: {
     defaultRateLimitRpm: env.USER_RATE_LIMIT_RPM,
     defaultMaxConcurrency: env.USER_MAX_CONCURRENCY,

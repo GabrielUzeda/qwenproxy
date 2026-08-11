@@ -58,7 +58,11 @@ app.use('*', async (c, next) => {
 
 app.use('/v1/*', async (c, next) => {
   const apiKey = process.env.API_KEY || config.apiKey
-  if (apiKey) {
+  const authRequired = config.authRequired || Boolean(apiKey)
+  if (authRequired) {
+    if (!apiKey) {
+      return c.json({ error: 'AUTH_REQUIRED=true but no API_KEY is configured' }, 500)
+    }
     const auth = c.req.header('Authorization')
     if (!auth?.startsWith('Bearer ')) {
       return c.json({ error: 'Missing or invalid Authorization header' }, 401)

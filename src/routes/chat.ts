@@ -9,6 +9,18 @@ import { loadAccounts } from '../core/accounts.js';
 import { registerStream, removeStream, getStream } from '../core/stream-registry.js';
 import { metrics } from '../core/metrics.js'
 import { config } from '../core/config.js';
+
+// Tracks the last time each session's server-side history was verified, so the
+// HYBRID_SESSION_VERIFY_EVERY_MS throttle can skip the network round-trip.
+const lastSessionVerify = new Map<string, number>();
+
+function pruneStaleVerifyEntries(): void {
+  if (lastSessionVerify.size <= 1000) return;
+  const cutoff = Date.now() - (config.hybridSessions.ttlMs || 86400000);
+  for (const [key, ts] of lastSessionVerify) {
+    if (ts < cutoff) lastSessionVerify.delete(key);
+  }
+}
 import { getSession, resolveSessionKey } from '../services/session-manager.js';
 import { lookupToolCall } from '../core/tool-call-registry.js';
 import type { SessionEntry } from '../services/session-manager.js';
@@ -379,7 +391,19 @@ export async function chatCompletions(c: Context) {
     );
 
     if (canEconomize && config.hybridSessions.verify) {
-      const usable = await verifyServerContextMatches(sessionKey!, session!, lastUserContent);
+      // Throttle the server-history verification: it is a network round-trip to
+      // Qwen on every economical turn. Once verified, skip for verifyEveryMs
+      // (default 60s) — sessions rarely diverge mid-tool-loop.
+      const verifyEveryMs = config.hybridSessions.verifyEveryMs || 60000;
+      let usable = true;
+      const lastVerify = lastSessionVerify.get(sessionKey!) || 0;
+      if (Date.now() - lastVerify >= verifyEveryMs) {
+        usable = await verifyServerContextMatches(sessionKey!, session!, lastUserContent);
+        if (usable) {
+          lastSessionVerify.set(sessionKey!, Date.now());
+          pruneStaleVerifyEntries();
+        }
+      }
       if (!usable) {
         console.warn(`[Chat] Session ${sessionKey} diverged from server; falling back to full bootstrap.`);
         canEconomize = false;
@@ -635,6 +659,17 @@ export async function chatCompletions(c: Context) {
     trackUsage(user ? user.id : 'anonymous', inputText, false);
     trackModelUsage(modelId);
     metrics.histogram('latency.completion', Date.now() - completionStart);
+
+    // Degenerate/tool-call retry guards hold up to GUARD_HOLD_BYTES (800) of
+    // output before flushing — a real latency cost on every stream. `prone`
+    // (default) only enables the guard when a terse reply is actually likely:
+    // economical turns and tool loops. `off` disables it entirely for lowest
+    // time-to-first-byte. `always` keeps the historical behavior.
+    const guardMode = config.streamDegenerateGuard;
+    const guardEnabled =
+      guardMode === 'always' ||
+      (guardMode === 'prone' && (canEconomize || hasToolConversation));
+
     return handleStreamingResponse(c, {
       stream: acquired.stream,
       completionId,
@@ -645,17 +680,19 @@ export async function chatCompletions(c: Context) {
       finalPrompt,
       streamOptions: body.stream_options,
       onComplete: releaseUserSlotOnce,
-      onDegenerateRetry: async () => {
-        console.warn('[Chat] Streaming degenerate reply detected. Regenerating on a clean chat...');
-        const retried = await obtainStream(`${finalPrompt}\n${buildAnswerDirective()}`, true);
-        return { stream: retried.stream, uiSessionId: retried.uiSessionId };
-      },
-      onToolCallRetry: async () => {
-        console.warn('[Chat] Tool call attempted but unparseable. Regenerating with corrective directive...');
-        const corrected = `${finalPrompt}\nIMPORTANT: Your previous tool call was malformed and could not be parsed. If a tool is needed, emit ONE valid JSON object wrapped EXACTLY in <tool_call> and </tool_call> tags, nothing else.`;
-        const retried = await obtainStream(corrected, true);
-        return { stream: retried.stream, uiSessionId: retried.uiSessionId };
-      },
+      ...(guardEnabled ? {
+        onDegenerateRetry: async () => {
+          console.warn('[Chat] Streaming degenerate reply detected. Regenerating on a clean chat...');
+          const retried = await obtainStream(`${finalPrompt}\n${buildAnswerDirective()}`, true);
+          return { stream: retried.stream, uiSessionId: retried.uiSessionId };
+        },
+        onToolCallRetry: hasToolConversation ? async () => {
+          console.warn('[Chat] Tool call attempted but unparseable. Regenerating with corrective directive...');
+          const corrected = `${finalPrompt}\nIMPORTANT: Your previous tool call was malformed and could not be parsed. If a tool is needed, emit ONE valid JSON object wrapped EXACTLY in <tool_call> and </tool_call> tags, nothing else.`;
+          const retried = await obtainStream(corrected, true);
+          return { stream: retried.stream, uiSessionId: retried.uiSessionId };
+        } : undefined,
+      } : {}),
     });
   } catch (err: any) {
     releaseUserSlotOnce();

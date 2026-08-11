@@ -854,7 +854,7 @@ export async function createQwenStream(
   const returnAccountKey = chatAccountKey;
 
   const resolvedFiles = files || [];
-  const LARGE_PROMPT_THRESHOLD = 131072;
+  const LARGE_PROMPT_THRESHOLD = config.largePromptThreshold;
   let finalPrompt = payloadPrompt;
   if (Buffer.byteLength(finalPrompt, 'utf-8') > LARGE_PROMPT_THRESHOLD) {
     try {

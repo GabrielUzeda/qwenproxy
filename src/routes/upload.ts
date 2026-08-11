@@ -7,6 +7,7 @@
 import type { Context } from "hono";
 import type OSSType from "ali-oss";
 import { getQwenHeaders } from "../services/playwright.js";
+import { config } from "../core/config.js";
 import crypto from "crypto";
 
 interface STSResponse {
@@ -770,8 +771,7 @@ export async function processImagesForQwen(
 
   return { text: textParts.join("\n"), files, docText: docTexts.join("\n\n---\n\n") };
 }
-
-const LARGE_PROMPT_THRESHOLD = 131072;
+const LARGE_PROMPT_THRESHOLD = config.largePromptThreshold;
 
 export async function uploadLargePromptAsFile(
   promptText: string,
