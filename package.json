@@ -3,7 +3,9 @@
   "version": "1.19.1",
   "description": "Local OpenAI-compatible proxy API that routes requests to Qwen (chat.qwen.ai) via Playwright browser automation.",
   "scripts": {
+    "prestart": "npm run build:admin",
     "start": "npx tsx src/index.ts",
+    "dev": "concurrently -k -n server,web -c green,cyan \"npx tsx watch src/index.ts --dev\" \"npm --prefix web run dev\"",
     "start:firefox": "npx tsx src/index.ts --browser=firefox",
     "start:chrome": "npx tsx src/index.ts --browser=chrome",
     "start:edge": "npx tsx src/index.ts --browser=edge",
@@ -50,6 +52,7 @@
     "@types/ali-oss": "^6.23.3",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.9.1",
+    "concurrently": "^10.0.4",
     "eslint": "^10.5.0",
     "semantic-release": "^25.0.3",
     "tsx": "^4.22.3",

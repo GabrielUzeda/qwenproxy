@@ -661,6 +661,11 @@ adminApp.post('/api/test-chat', adminGuard, async (c) => {
 
 const WEB_DIST = path.resolve('web', 'dist')
 
+// Dev mode (`npm run dev` passes --dev): redirect the SPA to the Vite dev server
+// so the panel always shows the latest source with HMR instead of the last build.
+const IS_WEB_DEV = process.argv.includes('--dev')
+const WEB_DEV_BASE = process.env.QWEN_WEB_DEV_URL || 'http://localhost:5173'
+
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
@@ -697,6 +702,10 @@ adminApp.get('/assets/*', (c) => {
 adminApp.get('*', (c) => {
   // API-only paths should not fall through to the SPA.
   if (c.req.path.startsWith('/api')) return c.notFound()
+  if (IS_WEB_DEV) {
+    const rel = c.req.path.replace(/^\/admin\/?/, '')
+    return c.redirect(`${WEB_DEV_BASE}/admin/${rel}`, 302)
+  }
   const rel = c.req.path.replace(/^\/admin\/?/, '') || 'index.html'
   // Serve real files from the built app (index.html, public/ assets, etc.);
   // unknown paths fall back to index.html for SPA routing.

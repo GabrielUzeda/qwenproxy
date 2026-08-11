@@ -170,9 +170,9 @@ export function App() {
       >
         <div className="flex items-center justify-center px-5 py-7">
           <img
-            src={`${import.meta.env.BASE_URL}qwenproxy.png`}
+            src={`${import.meta.env.BASE_URL}${dark ? 'qwenproxy.png' : 'qwenproxy-dark.png'}`}
             alt="QwenProxy"
-            className={cn('w-auto shrink-0 object-contain', collapsed ? 'h-8' : 'h-16')}
+            className={cn('h-auto shrink-0 object-contain', collapsed ? 'w-24' : 'w-48')}
           />
         </div>
         <Separator />
