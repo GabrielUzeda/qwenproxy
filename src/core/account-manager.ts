@@ -294,6 +294,15 @@ export function getNextAccount(forceReset?: boolean): QwenAccount | null {
     return viable.find(a => getAccountActiveLoad(a.id) === minLoad)!
   }
 
+  // Healthy accounts exist but are all busy (in-use): return null so the caller
+  // waits for a lane to free instead of failing immediately on a cooldown
+  // account. The cooldown fallback below must only apply when NO account is
+  // healthy at all.
+  const hasHealthyAccount = accounts.some(a => getAccountCooldownInfo(a.id) === null)
+  if (hasHealthyAccount) {
+    return null
+  }
+
   if (config.accounts.singleAccountMode) {
     return null
   }
@@ -340,6 +349,13 @@ export function getNextAvailableAccount(triedAccountIds?: Set<string> | string):
     const chosen = candidates.find(a => getAccountActiveLoad(a.id) === minLoad)!
     currentIndex = (accounts.indexOf(chosen) + 1) % accounts.length
     return chosen
+  }
+
+  // Healthy untried accounts exist but are all in-use: return null so the
+  // caller waits for a lane instead of falling through to a cooldown account.
+  const hasHealthyAccount = accounts.some(a => !triedSet.has(a.id) && getAccountCooldownInfo(a.id) === null)
+  if (hasHealthyAccount) {
+    return null
   }
 
   if (config.accounts.singleAccountMode) {

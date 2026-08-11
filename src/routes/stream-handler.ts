@@ -128,14 +128,20 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       });
 
       const emittedStreamingToolIds = new Set<string>();
+      // Dedup by call CONTENT (name+arguments), not just id: on the rare
+      // content-rewrite path the parser can re-emit the same tool call with a
+      // fresh id, which would surface as a duplicate tool call to the client.
+      const emittedStreamingToolSignatures = new Set<string>();
 
       const emitStreamingToolCall = (tc: { id: string; name: string; arguments: Record<string, unknown> }, index: number) => {
         if (emittedStreamingToolIds.has(tc.id)) return;
-        emittedStreamingToolIds.add(tc.id);
-        // `arguments` MUST be a JSON string in OpenAI format. Never double-encode.
         const argsStr = typeof tc.arguments === 'string'
           ? tc.arguments
           : JSON.stringify(tc.arguments ?? {});
+        const signature = `${tc.name}\u0000${argsStr}`;
+        if (emittedStreamingToolSignatures.has(signature)) return;
+        emittedStreamingToolIds.add(tc.id);
+        emittedStreamingToolSignatures.add(signature);
         recordToolCallEmission(ctx.uiSessionId, tc.id, tc.name, argsStr);
         const toolCallChunk = `data: ${JSON.stringify({
           id: ctx.completionId,
@@ -545,6 +551,7 @@ export async function collectNonStreamingResult(
   const decoder = new TextDecoder();
   const toolCallsOut: any[] = [];
   const seenToolCallIds = new Set<string>();
+  const seenToolCallSignatures = new Set<string>();
   let buffer = '';
   let completed = false;
   const completeOnce = () => {
@@ -557,6 +564,9 @@ export async function collectNonStreamingResult(
     if (seenToolCallIds.has(tc.id)) return;
     seenToolCallIds.add(tc.id);
     const argsStr = typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments ?? {});
+    const signature = `${tc.name}\u0000${argsStr}`;
+    if (seenToolCallSignatures.has(signature)) return;
+    seenToolCallSignatures.add(signature);
     recordToolCallEmission(uiSessionId, tc.id, tc.name, argsStr);
     const entry = { id: tc.id, type: 'function', function: { name: tc.name, arguments: argsStr } };
     recordToolCall(completionId, 'non-streaming', JSON.stringify(entry));

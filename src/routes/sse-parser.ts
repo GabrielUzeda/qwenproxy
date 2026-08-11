@@ -74,15 +74,16 @@ export function getIncrementalDelta(oldStr: string, newStr: string, prevLength: 
     };
   }
 
-  // IMPORTANT: matchedContent must be the REAL accumulated text (newStr). Using
-  // old+new previously duplicated content, which corrupted the streaming state
-  // and made the tool parser see every <tool_call> block twice — emitting
-  // duplicate tool calls with different ids.
+  const combined = oldStr + newStr;
+  // Fallback keeps the CLIENT and the tracked content CONSISTENT: the delta
+  // emitted (newStr) is what the client accumulates, so matchedContent must
+  // equal oldStr+newStr (what the client ends up with). Tracking newStr here
+  // would desync the delta protocol on the rare rewrite path.
   return {
     delta: newStr,
-    matchedContent: newStr,
-    contentLength: newStr.length,
-    contentSuffix: newStr.slice(-64)
+    matchedContent: combined,
+    contentLength: combined.length,
+    contentSuffix: combined.slice(-64)
   };
 }
 

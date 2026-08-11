@@ -358,12 +358,24 @@ export async function chatCompletions(c: Context) {
     // rest of the conversation stays threaded server-side. Prior context is
     // guaranteed by historyComplete + the parent-based server verification, so
     // even all-tool_calls conversations can economize.
+    // Tool loops send intermediate turns whose LAST message is a tool/function
+    // result (not a user message). Without this, every intermediate turn was
+    // treated as non-economical, so the proxy minted a FRESH chat each turn,
+    // re-registering the session and losing Qwen's server-side history — the
+    // full conversation was re-sent every time (huge prompts) and the session
+    // never stabilised. Threading the tool responses into the pinned chat keeps
+    // continuity exactly like the Qwen web UI (tool results are user messages).
+    const isToolResultTurn = hasToolConversation &&
+      (lastMsg?.role === 'tool' || lastMsg?.role === 'function');
+
     let canEconomize = !!(
       session?.historyComplete &&
       session.accountId !== 'guest' &&
-      lastMsg?.role === 'user' &&
-      lastUserContent &&
-      pendingMultimodal.length === 0
+      pendingMultimodal.length === 0 &&
+      (
+        (lastMsg?.role === 'user' && !!lastUserContent) ||
+        isToolResultTurn
+      )
     );
 
     if (canEconomize && config.hybridSessions.verify) {
@@ -379,8 +391,11 @@ export async function chatCompletions(c: Context) {
       const parts: string[] = [];
       if (systemPrompt) parts.push(systemPrompt);
       if (recentToolContext) parts.push(recentToolContext);
-      parts.push(`User: ${lastUserContent}`);
+      if (lastMsg?.role === 'user') {
+        parts.push(`User: ${lastUserContent}`);
+      }
       economicalPrompt = parts.join('\n');
+      if (!economicalPrompt.trim()) canEconomize = false;
     }
     const baseStreamOptions = { sessionKey, economicalPrompt };
 
