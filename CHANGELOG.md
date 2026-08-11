@@ -1,3 +1,10 @@
+# [1.19.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.18.1...v1.19.0) (2026-08-11)
+
+
+### Features
+
+* robust performance-focused env configuration with validated runtime switches ([4921783](https://github.com/pedrofariasx/qwenproxy/commit/492178329709342dbb542ce8fa3bc31279c0091c))
+
 ## [1.18.1](https://github.com/pedrofariasx/qwenproxy/compare/v1.18.0...v1.18.1) (2026-08-11)
 
 
