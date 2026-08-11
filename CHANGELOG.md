@@ -1,3 +1,11 @@
+# [1.17.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.16.0...v1.17.0) (2026-08-11)
+
+
+### Features
+
+* accurate dashboard metrics, instant live settings, active-streams API and watchdog status ([da91508](https://github.com/pedrofariasx/qwenproxy/commit/da91508372ec7f725f4188d37f45ac306679399c))
+* admin light mode, streams page and dashboard functional fixes ([10adb78](https://github.com/pedrofariasx/qwenproxy/commit/10adb789fbd72694ad74108c67440512ea840265))
+
 # [1.16.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.15.0...v1.16.0) (2026-08-11)
 
 
