@@ -1,3 +1,10 @@
+## [1.20.1](https://github.com/pedrofariasx/qwenproxy/compare/v1.20.0...v1.20.1) (2026-08-16)
+
+
+### Bug Fixes
+
+* robust account header capture — specific input selector, guest-flow timing, retry cap ([5b3fd3e](https://github.com/pedrofariasx/qwenproxy/commit/5b3fd3eecb39aa12c8f4a83959044ab7c809e0c0))
+
 # [1.20.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.19.1...v1.20.0) (2026-08-11)
 
 
