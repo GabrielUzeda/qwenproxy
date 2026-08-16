@@ -285,21 +285,33 @@ async function tryLightweightCookieRefresh(accountId?: string): Promise<{ header
   return null;
 }
 
+const MAX_HEADER_CAPTURE_RETRIES = 2;
+
 async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Promise<{ headers: Record<string, string>, chatSessionId: string, parentMessageId: string | null }> {
-  try {
-    return await _getQwenHeadersInternalOnce(forceNew, accountId);
-  } catch (err: any) {
-    const cacheKey = accountId || 'global';
-    if (!forceNew && err?.message?.includes('Timeout waiting for Qwen headers for')) {
-      console.warn(`[Playwright] Header capture timed out for ${cacheKey}; clearing browser profile and retrying once...`);
-      await resetBrowserProfile(cacheKey, accountId);
-      if (!accountId && getActiveAccountCount() === 0) {
-        await initPlaywright(config.browser.headless, config.browser.type);
+  const cacheKey = accountId || 'global';
+  let lastError: any;
+
+  for (let attempt = 0; attempt <= MAX_HEADER_CAPTURE_RETRIES; attempt++) {
+    try {
+      return await _getQwenHeadersInternalOnce(forceNew || attempt > 0, accountId);
+    } catch (err: any) {
+      lastError = err;
+      const isTimeout = err?.message?.includes('Timeout waiting for Qwen headers for');
+
+      if (attempt < MAX_HEADER_CAPTURE_RETRIES && isTimeout) {
+        console.warn(`[Playwright] Header capture timed out for ${cacheKey}; clearing browser profile and retrying (attempt ${attempt + 1}/${MAX_HEADER_CAPTURE_RETRIES})...`);
+        await resetBrowserProfile(cacheKey, accountId);
+        if (!accountId && getActiveAccountCount() === 0) {
+          await initPlaywright(config.browser.headless, config.browser.type);
+        }
+        continue;
       }
-      return await _getQwenHeadersInternalOnce(true, accountId);
+
+      break;
     }
-    throw err;
   }
+
+  throw lastError || new Error(`Header capture failed for ${cacheKey} after ${MAX_HEADER_CAPTURE_RETRIES + 1} attempts`);
 }
 
 async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string): Promise<{ headers: Record<string, string>, chatSessionId: string, parentMessageId: string | null }> {
@@ -406,13 +418,6 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
     }
   }
 
-  console.log(`[Playwright] Waiting for chat input for ${cacheKey}...`);
-  const inputSelector = 'textarea:visible, [contenteditable="true"]:visible';
-  await page.waitForSelector(inputSelector, { timeout: config.timeouts.page }).catch(() => {
-    console.error(`[Playwright] Chat input not found for ${cacheKey}. Current URL:`, page.url());
-    throw new Error(`Timeout waiting for chat input for ${cacheKey}. Are you logged in?`);
-  });
-
   const watcher = startCaptchaWatcher(page, config.timeouts.headers);
   try {
     return await new Promise<{ headers: Record<string, string>, chatSessionId: string, parentMessageId: string | null }>((resolve, reject) => {
@@ -484,47 +489,52 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
 
       page.route('**/api/v2/chat/completions*', routeHandler).then(async () => {
         console.log(`[Playwright] Triggering request for ${cacheKey}...`);
-        const inputSelector = 'textarea:visible, [contenteditable="true"]:visible';
+        const inputSelector = 'textarea.message-input-textarea, textarea:visible, [contenteditable="true"]:visible';
+        try {
+          await page.waitForSelector(inputSelector, { timeout: config.timeouts.page });
+          await humanType(page, inputSelector, 'Hello');
+          console.log(`[Playwright] Typed human text for ${cacheKey}, waiting for UI to update...`);
+          await sleep(humanDelay(1500, 2500));
 
-        await humanType(page, inputSelector, 'Hello');
-        console.log(`[Playwright] Typed human text for ${cacheKey}, waiting for UI to update...`);
-        await sleep(humanDelay(1500, 2500));
+          const selectors = [
+            '.message-input-right-button-send .send-button',
+            '.chat-prompt-send-button',
+            'button.send-button'
+          ];
 
-        const selectors = [
-          '.message-input-right-button-send .send-button',
-          '.chat-prompt-send-button',
-          'button.send-button'
-        ];
+          let clicked = false;
+          for (const selector of selectors) {
+            try {
+              const btn = await page.$(selector);
+              if (btn && await btn.isVisible()) {
+                console.log(`[Playwright] Attempting click on: ${selector}`);
 
-        let clicked = false;
-        for (const selector of selectors) {
-          try {
-            const btn = await page.$(selector);
-            if (btn && await btn.isVisible()) {
-              console.log(`[Playwright] Attempting click on: ${selector}`);
+                await page.evaluate((sel) => {
+                  const element = document.querySelector(sel) as HTMLElement;
+                  if (element) {
+                    element.focus();
+                    element.click();
+                  }
+                }, selector);
 
-              await page.evaluate((sel) => {
-                const element = document.querySelector(sel) as HTMLElement;
-                if (element) {
-                  element.focus();
-                  element.click();
-                }
-              }, selector);
+                await btn.click({ force: true, delay: humanDelay(30, 80) }).catch(() => {});
 
-              await btn.click({ force: true, delay: humanDelay(30, 80) }).catch(() => {});
-
-              clicked = true;
-              break;
+                clicked = true;
+                break;
+              }
+            } catch (e) {
+              console.error(`[Playwright] Error clicking ${selector} for ${cacheKey}:`, e);
             }
-          } catch (e) {
-            console.error(`[Playwright] Error clicking ${selector} for ${cacheKey}:`, e);
           }
-        }
 
-        if (!clicked) {
-          console.log(`[Playwright] No send button found/clicked for ${cacheKey}, fallback to Enter...`);
-          await page.focus(inputSelector);
-          await page.keyboard.press('Enter');
+          if (!clicked) {
+            console.log(`[Playwright] No send button found/clicked for ${cacheKey}, fallback to Enter...`);
+            await page.focus(inputSelector);
+            await page.keyboard.press('Enter');
+          }
+        } catch (e) {
+          clearTimeout(timeout);
+          reject(e);
         }
       });
     });
