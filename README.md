@@ -9,6 +9,7 @@ Proxy API local compatível com OpenAI que roteia requisições para os modelos 
 [![Hono](https://img.shields.io/badge/Hono-4.12-green)](https://hono.dev/)
 [![Playwright](https://img.shields.io/badge/Playwright-1.60-blueviolet)](https://playwright.dev/)
 [![License: ISC](https://img.shields.io/badge/License-ISC-yellow.svg)](LICENSE)
+<a href="https://www.buymeacoffee.com/pedrofariasx" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" style="height: 20px !important;width: 78px !important;" ></a>
 
 ---
 
